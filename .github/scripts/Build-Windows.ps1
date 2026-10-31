@@ -47,6 +47,13 @@ function Build {
     Push-Location -Stack BuildTemp
     Ensure-Location $ProjectRoot
 
+    Log-Group "Fetching external dependencies..."
+    & "${ProjectRoot}/scripts/fetch-dependencies.ps1"
+    if (-not $?) {
+        throw "External dependency fetch failed"
+    }
+    Log-Group
+
     $CmakeArgs = @('--preset', "windows-ci-${Target}")
     $CmakeBuildArgs = @('--build')
     $CmakeInstallArgs = @()
