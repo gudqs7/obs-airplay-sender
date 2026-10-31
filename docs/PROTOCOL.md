@@ -34,6 +34,9 @@ stream_key = SHA-512(fairplay_aes_key || x25519_shared_secret)[:16]
 - profile：High。
 - 码率控制：CBR。
 - 关键帧间隔：1 秒。
+- 不使用 B 帧或编码器前瞻。AirPlay 接收端按收到访问单元的顺序消费视频；
+  实测 NVENC `B-frames=2`、8 帧 lookahead 时，抖音虽然收到 60 fps，但解码输出
+  只有约 21 fps。NVENC 必须使用超低延迟调优、`bf=0`、`lookahead=false`。
 - 输出尺寸：按接收端协商画布等比缩放，宽高保持偶数。
 - OBS 编码包通过回环 IPC 传送到 bridge，bridge 转换为 Annex-B access unit。
 

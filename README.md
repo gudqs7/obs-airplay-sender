@@ -196,6 +196,21 @@ ZIP 是手动安装包，解压后把顶层 `obs-airplay-cast` 目录放到
 | H.264 编码器 | 自动 | 优先 NVENC，其次 QSV，最后 x264 |
 | 音频 | 44.1 kHz / 16-bit / stereo | OBS 主混音由 bridge 编码为 AAC-ELD |
 
+### 抖音色彩校准 LUT
+
+`tools/luts/` 提供从实测颜色生成的 33³ LUT：
+
+| 文件 | 用途 |
+|---|---|
+| `douyin-airplay-color-correct.cube` | 默认实测校准 |
+| `douyin-airplay-color-correct-soft60.cube` | 默认校准强度的 60% |
+| `douyin-airplay-color-correct-soft40.cube` | 默认校准强度的 40% |
+| `douyin-airplay-color-correct-boost.cube` | 高饱和补偿版本 |
+| `douyin-airplay-color-correct-rfast.cube` | 读取器按红轴最快的兼容版本 |
+
+可用 `tools/generate_douyin_color_lut.py` 重新生成或调整强度。默认生成结果与仓库中的
+`douyin-airplay-color-correct.cube` 在校验中保持一致。
+
 ## 工作方式
 
 ```text
@@ -340,6 +355,8 @@ Apache-2.0 不替代 MPEG AAC 必要专利授权。分发包含 AAC 编码器的
 
 ## 版本说明
 
+- `0.1.4`：NVENC 改用 AirPlay 超低延迟配置，关闭 B 帧和编码器前瞻，修复抖音收到
+  60 fps 但只解码约 21 fps 的掉帧问题；补充抖音 AirPlay 色彩校准 LUT 和生成工具。
 - `0.1.3`：新增 `启动OBS自动连接抖音`，未配置时默认勾选，并在接收端未出现或投屏
   会话断开时每秒重试；一键安装器改为 Inno Setup，普通安装和升级不主动请求 UAC；
   设置窗口扫描改为可回收的后台任务，退出和手动停止时会取消轮询。

@@ -358,11 +358,15 @@ bool AirPlayCast::StartOutput(int receiver_width, int receiver_height, const Air
 		obs_data_set_string(encoder_settings, "preset", "veryfast");
 		obs_data_set_string(encoder_settings, "tune", "zerolatency");
 		obs_data_set_bool(encoder_settings, "repeat_headers", true);
-		obs_data_set_string(encoder_settings, "x264opts",
-				    "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=limited");
 	} else if (encoder_id.find("nvenc") != std::string::npos) {
 		obs_data_set_string(encoder_settings, "preset", "p5");
-		obs_data_set_string(encoder_settings, "tune", "hq");
+		// AirPlay mirroring consumes access units in wire order. B-frames and
+		// lookahead create decode-order timestamps and add latency, which makes
+		// Douyin's receiver present only about one third of a 60 fps stream.
+		obs_data_set_string(encoder_settings, "tune", "ull");
+		obs_data_set_int(encoder_settings, "bf", 0);
+		obs_data_set_bool(encoder_settings, "lookahead", false);
+		obs_data_set_string(encoder_settings, "multipass", "disabled");
 	}
 
 	video_encoder_ = obs_video_encoder_create(encoder_id.c_str(), "obs-airplay-h264", encoder_settings, nullptr);
@@ -371,6 +375,11 @@ bool AirPlayCast::StartOutput(int receiver_width, int receiver_height, const Air
 		error = "could not create H.264 encoder " + encoder_id;
 		return false;
 	}
+
+	// Douyin renders AirPlay video into a partial-range NV12 surface.
+	obs_encoder_set_gpu_scale_type(video_encoder_, OBS_SCALE_BILINEAR);
+	obs_encoder_set_preferred_color_space(video_encoder_, VIDEO_CS_709);
+	obs_encoder_set_preferred_range(video_encoder_, VIDEO_RANGE_PARTIAL);
 
 	obs_encoder_set_video(video_encoder_, obs_get_video());
 	obs_encoder_set_scaled_size(video_encoder_, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
