@@ -97,8 +97,8 @@ Apache-2.0 许可证/NOTICE。
 
 ## 一键安装包
 
-`Package-Windows.ps1` 在 CI 中除了生成便携 ZIP，还会调用
-`installer/Build-WindowsInstaller.ps1` 生成系统级 `Setup.exe`。本地构建时：
+发布前先安装到本地发布目录，再调用 `installer/Build-WindowsInstaller.ps1`
+生成系统级 `Setup.exe`。仓库不包含托管 CI：
 
 ```powershell
 $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
@@ -177,4 +177,3 @@ bridge 日志位于 `%TEMP%\obs-airplay-cast-bridge.log`，每次 bridge 启动�
 | `.deps/source/` | 构建时获取的 doubletake 和 libxaac，受 `.gitignore` 排除 |
 | `tools/` | IPC、音频会话、窗口诊断和 AAC-ELD helper 协议测试 |
 | `cmake/` | OBS 插件模板的 CMake 配置 |
-| `.github/` | Windows 构建和格式检查工作流 |
