@@ -106,7 +106,7 @@ Apache-2.0 许可证/NOTICE。
 ## 一键安装包
 
 发布前先安装到本地发布目录，再调用 `installer/Build-WindowsInstaller.ps1`
-生成系统级 `Setup.exe`。仓库不包含托管 CI：
+通过 Inno Setup 6 生成 `Setup.exe`。仓库不包含托管 CI：
 
 ```powershell
 $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
@@ -114,20 +114,12 @@ $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\Co
 .\installer\Build-WindowsInstaller.ps1 -Configuration RelWithDebInfo
 ```
 
-安装器会嵌入完整插件载荷，并生成对应的 `.sha256` 文件。它安装到
-`%ProgramData%\obs-studio\plugins\obs-airplay-cast`，启动时请求管理员权限。验证安装器时
-至少检查：
-
-1. OBS 运行时先确认关闭再覆盖安装。
-2. 安装后 OBS 可以加载 `obs-airplay-cast.dll` 并显示 AirPlay 投屏菜单。
-3. 再次运行安装包可以完成覆盖升级。
-4. Windows 应用列表中的卸载入口可以移除插件。
-5. 交互安装时确认步骤文字、百分比和进度条持续更新，窗口可拖动并重绘。
-6. 运行 `installer\Test-Installer.ps1`，确认静默安装进度从 0 到 100 且不倒退。
-7. 运行 `installer\Test-InstallerUi.ps1`，确认进度条在点击安装前隐藏、点击后可见，
-   且安装期间鼠标保持普通图标；98% 启动 OBS 阶段窗口仍可响应，100% 不提前显示。
-8. 运行 `installer\Test-InstallerElevation.ps1`，确认提权重启后的子安装窗口恢复前台焦点；
-   如需验证真实 OBS 启动，追加 `-UseInstalledObs` 运行 UI 测试。
+`installer/obs-airplay-cast.iss` 负责安装界面、文件布局、卸载入口和历史版本清理；
+`Build-WindowsInstaller.ps1` 只校验发布目录、调用 `ISCC.exe` 并生成 `.sha256`。
+安装器默认安装到
+`%ProgramData%\obs-studio\plugins\obs-airplay-cast`，安装与升级不主动请求管理员
+权限。检测到旧版 `obs-airplay-cast` 时，会先调用旧卸载程序；只有这一步可能继承旧版的
+UAC 请求。打包脚本不在编译完成后自动执行安装测试。
 
 ## 合成输入探针
 

@@ -5,7 +5,7 @@ param(
     [string] $ReleaseDirectory,
     [string] $OutputDirectory,
     [string] $Version,
-    [switch] $KeepTemporary
+    [string] $CompilerPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,17 +25,17 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $ProjectRoot 'release'
 }
 
-$ReleaseDirectory = [System.IO.Path]::GetFullPath($ReleaseDirectory)
-$OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
-$PluginDirectory = Join-Path $ReleaseDirectory 'obs-airplay-cast'
-$Csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-$AssetsDirectory = Join-Path $PSScriptRoot 'assets'
-$LogoImage = Join-Path $AssetsDirectory 'logo-64.png'
-$LogoIcon = Join-Path $AssetsDirectory 'obs-airplay-sender.ico'
-
-if (!(Test-Path -LiteralPath $Csc -PathType Leaf)) {
-    throw "找不到 .NET Framework x64 C# 编译器：$Csc"
-}
+$ReleaseDirectory = [IO.Path]::GetFullPath($ReleaseDirectory)
+$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
+$PayloadDirectory = Join-Path $ReleaseDirectory 'obs-airplay-cast'
+$InstallerScript = Join-Path $PSScriptRoot 'obs-airplay-cast.iss'
+$IconPath = Join-Path $PSScriptRoot 'assets\obs-airplay-sender.ico'
+$SetupName = "$($BuildSpec.name)-$Version-windows-x64-Setup.exe"
+$SetupPath = Join-Path $OutputDirectory $SetupName
+$HashPath = "$SetupPath.sha256"
+$ZipName = "$($BuildSpec.name)-$Version-windows-x64.zip"
+$ZipPath = Join-Path $OutputDirectory $ZipName
+$ZipHashPath = "$ZipPath.sha256"
 
 $RequiredFiles = @(
     'bin/64bit/obs-airplay-cast.dll'
@@ -52,131 +52,93 @@ $RequiredFiles = @(
     'licenses/libxaac-NOTICE.txt'
 )
 
-foreach ($AssetPath in @($LogoImage, $LogoIcon)) {
+foreach ($AssetPath in @($InstallerScript, $IconPath)) {
     if (!(Test-Path -LiteralPath $AssetPath -PathType Leaf)) {
         throw "安装器资源缺失，缺少：$AssetPath"
     }
 }
 
 foreach ($RelativePath in $RequiredFiles) {
-    $Path = Join-Path $PluginDirectory $RelativePath
+    $Path = Join-Path $PayloadDirectory $RelativePath
     if (!(Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "插件安装目录不完整，缺少：$Path"
     }
 }
 
-$TemporaryRoot = Join-Path $env:TEMP "obs-airplay-sender-installer-$([guid]::NewGuid().ToString('N'))"
-$PayloadRoot = Join-Path $TemporaryRoot 'payload'
-$PayloadZip = Join-Path $TemporaryRoot 'payload.zip'
-$VersionFile = Join-Path $TemporaryRoot 'VersionInfo.cs'
-$UninstallerPath = Join-Path $TemporaryRoot 'Uninstall.exe'
-$SetupName = "$($BuildSpec.name)-$Version-windows-x64-Setup.exe"
-$SetupPath = Join-Path $OutputDirectory $SetupName
-$HashPath = "$SetupPath.sha256"
+if ([string]::IsNullOrWhiteSpace($CompilerPath)) {
+    $Candidates = @(
+        $env:INNO_SETUP_COMPILER
+        (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe')
+        (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe')
+        (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe')
+    ) | Where-Object { !( [string]::IsNullOrWhiteSpace($_) ) }
 
+    $CompilerPath = $Candidates |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Select-Object -First 1
+}
+if ([string]::IsNullOrWhiteSpace($CompilerPath) -or
+    !(Test-Path -LiteralPath $CompilerPath -PathType Leaf)) {
+    throw '找不到 Inno Setup 6 的 ISCC.exe。请安装 Inno Setup 6，或传入 -CompilerPath。'
+}
+$CompilerPath = [IO.Path]::GetFullPath($CompilerPath)
+
+$VersionParts = @($Version -split '\.')
+$VersionInfoVersion = '0.0.0.0'
+if ($VersionParts.Count -ge 1 -and $VersionParts.Count -le 4 -and
+    @($VersionParts | Where-Object { $_ -notmatch '^\d+$' }).Count -eq 0) {
+    $NumericParts = @($VersionParts | ForEach-Object { [int] $_ })
+    while ($NumericParts.Count -lt 4) {
+        $NumericParts += 0
+    }
+    $VersionInfoVersion = $NumericParts[0..3] -join '.'
+}
+
+New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+
+$OutputBaseFilename = [IO.Path]::GetFileNameWithoutExtension($SetupName)
+$CompilerArguments = @(
+    "/DMyAppVersion=$Version"
+    "/DMyVersionInfoVersion=$VersionInfoVersion"
+    "/DMyReleaseDirectory=$PayloadDirectory"
+    "/DMyOutputDirectory=$OutputDirectory"
+    "/DMyOutputBaseFilename=$OutputBaseFilename"
+    $InstallerScript
+)
+
+& $CompilerPath @CompilerArguments
+if ($LASTEXITCODE -ne 0) {
+    throw "Inno Setup 编译失败，退出码：$LASTEXITCODE"
+}
+if (!(Test-Path -LiteralPath $SetupPath -PathType Leaf)) {
+    throw "Inno Setup 未生成预期文件：$SetupPath"
+}
+
+$Hash = (Get-FileHash -LiteralPath $SetupPath -Algorithm SHA256).Hash.ToLowerInvariant()
+"$Hash  $SetupName" | Set-Content -LiteralPath $HashPath -Encoding ASCII
+
+$ZipTemporaryRoot = Join-Path $env:TEMP (
+    "obs-airplay-zip-" + [guid]::NewGuid().ToString('N'))
+$ZipSourceDirectory = Join-Path $ZipTemporaryRoot 'obs-airplay-cast'
 try {
-    New-Item -ItemType Directory -Path $PayloadRoot -Force | Out-Null
-    New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
-
-    Copy-Item -LiteralPath $PluginDirectory -Destination $PayloadRoot -Recurse
-    Get-ChildItem -LiteralPath $PayloadRoot -Recurse -File |
+    Copy-Item -LiteralPath $PayloadDirectory -Destination $ZipSourceDirectory -Recurse
+    Get-ChildItem -LiteralPath $ZipSourceDirectory -Recurse -File |
         Where-Object { $_.Extension -in @('.pdb', '.ilk', '.exp') } |
         Remove-Item -Force
 
-    # Keep compatibility with OBS data-root resolution variants used by older
-    # plugin loaders. The canonical location remains data/locale.
-    $PayloadPluginDirectory = Join-Path $PayloadRoot 'obs-airplay-cast'
-    $LocaleSource = Join-Path $PayloadPluginDirectory 'data/locale'
-    foreach ($RelativePath in @(
-        'locale'
-        'bin/64bit/locale'
-        'data/obs-plugins/obs-airplay-cast/locale'
-    )) {
-        $LocaleTarget = Join-Path $PayloadPluginDirectory $RelativePath
-        New-Item -ItemType Directory -Path $LocaleTarget -Force | Out-Null
-        Copy-Item -Path (Join-Path $LocaleSource '*.ini') -Destination $LocaleTarget -Force
-    }
-
-    foreach ($RelativePath in $RequiredFiles) {
-        $PayloadPath = Join-Path $PayloadPluginDirectory $RelativePath
-        if (!(Test-Path -LiteralPath $PayloadPath -PathType Leaf)) {
-            throw "安装器载荷缺少文件：$PayloadPath"
-        }
-    }
-
-    Compress-Archive -Path (Join-Path $PayloadRoot 'obs-airplay-cast/*') `
-        -DestinationPath $PayloadZip -CompressionLevel Optimal
-
-    $AssemblyVersion = $Version
-    if ($AssemblyVersion -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
-        $AssemblyVersion = '0.0.0.0'
-    }
-    elseif (($AssemblyVersion -split '\.').Count -eq 3) {
-        $AssemblyVersion += '.0'
-    }
-
-    @"
-using System.Reflection;
-
-[assembly: AssemblyTitle("OBS AirPlay Sender Setup")]
-[assembly: AssemblyDescription("OBS AirPlay Sender one-click installer")]
-[assembly: AssemblyProduct("OBS AirPlay Sender")]
-[assembly: AssemblyCompany("gudqs7")]
-[assembly: AssemblyCopyright("GPL-2.0")]
-[assembly: AssemblyVersion("$AssemblyVersion")]
-[assembly: AssemblyFileVersion("$AssemblyVersion")]
-[assembly: AssemblyInformationalVersion("$Version")]
-"@ | Set-Content -LiteralPath $VersionFile -Encoding UTF8
-
-    $CommonCscArguments = @(
-        '/nologo'
-        '/target:winexe'
-        '/platform:x64'
-        '/optimize+'
-        '/codepage:65001'
-        "/win32manifest:$PSScriptRoot\app.manifest"
-        "/win32icon:$LogoIcon"
-        "/reference:System.IO.Compression.dll"
-        "/reference:System.IO.Compression.FileSystem.dll"
-    )
-
-    $UninstallerCscArguments = $CommonCscArguments + @(
-        '/define:UNINSTALLER'
-        "/out:$UninstallerPath"
-        (Join-Path $PSScriptRoot 'Setup.cs')
-        $VersionFile
-    )
-
-    & $Csc @UninstallerCscArguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "C# 卸载程序编译失败，退出码：$LASTEXITCODE"
-    }
-
-    $SetupCscArguments = $CommonCscArguments + @(
-        "/resource:$PayloadZip,OBSAirPlay.Payload.zip"
-        "/resource:$UninstallerPath,OBSAirPlay.Uninstaller.exe"
-        "/resource:$LogoImage,OBSAirPlay.Logo.64.png"
-        "/out:$SetupPath"
-        (Join-Path $PSScriptRoot 'Setup.cs')
-        $VersionFile
-    )
-
-    & $Csc @SetupCscArguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "C# 安装程序编译失败，退出码：$LASTEXITCODE"
-    }
-
-    $Hash = (Get-FileHash -LiteralPath $SetupPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    "$Hash  $SetupName" | Set-Content -LiteralPath $HashPath -Encoding ASCII
-
-    Write-Host "Installer: $SetupPath"
-    Write-Host "SHA256:    $Hash"
+    Compress-Archive -LiteralPath $ZipSourceDirectory -DestinationPath $ZipPath `
+        -CompressionLevel Optimal -Force
+    $ZipHash = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$ZipHash  $ZipName" | Set-Content -LiteralPath $ZipHashPath -Encoding ASCII
 }
 finally {
-    if (!$KeepTemporary -and (Test-Path -LiteralPath $TemporaryRoot)) {
-        Remove-Item -LiteralPath $TemporaryRoot -Recurse -Force
-    }
-    elseif ($KeepTemporary) {
-        Write-Host "Temporary installer build data kept at: $TemporaryRoot"
+    if (Test-Path -LiteralPath $ZipTemporaryRoot) {
+        Remove-Item -LiteralPath $ZipTemporaryRoot -Recurse -Force
     }
 }
+
+Write-Host "Compiler: $CompilerPath"
+Write-Host "Installer: $SetupPath"
+Write-Host "SHA256:    $Hash"
+Write-Host "Archive:   $ZipPath"
+Write-Host "ZIP SHA256: $ZipHash"

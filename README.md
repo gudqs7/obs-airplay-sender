@@ -98,28 +98,31 @@ obs-airplay-cast-<版本>-windows-x64-Setup.exe
 
 先正常关闭 OBS Studio，然后双击安装包。安装程序会：
 
-- 检查 64 位 Windows，并把插件安装到系统级目录
+- 检查 64 位 Windows，并把插件安装到
   `%ProgramData%\obs-studio\plugins\obs-airplay-cast`。
 - 检测 OBS 是否正在运行，并在确认后先关闭 OBS 再安装。
-- 覆盖升级已有版本，同时保留上一版安装目录用于回滚。
-- 点击“安装”后显示当前步骤、百分比和进度条；解压与文件操作在后台执行，界面保持
-  可重绘，鼠标不会切换成等待图标。
+- 升级前调用已安装的卸载程序，清理上一版后再安装新文件。
 - 安装完成后直接启动 OBS。
-- 在 Windows 的 `设置 → 应用 → 已安装的应用` 中注册卸载入口。
+- 在 Windows 的 `设置 → 应用 → 已安装的应用` 中注册当前用户卸载入口。
 
-安装器会在启动时请求一次管理员权限，用于更新系统级 OBS 插件目录。当前构建没有
-商业代码签名证书，首次运行时 Windows SmartScreen 可能显示提示；请从 Releases
-下载，并用同一页面提供的 SHA-256 校验值核对文件。
+安装器本身以普通权限运行，首次安装和后续升级通常都不会触发 UAC。如果检测到旧版
+`obs-airplay-cast` 系统级插件，安装器会调用旧卸载程序；这个仅用于清理历史版本的步骤
+可能触发一次 UAC，随后继续写入同一目录。
+
+当前构建没有商业代码签名证书，首次运行时 Windows SmartScreen 可能显示提示；请从
+Releases 下载，并用同一页面提供的 SHA-256 校验值核对文件。
 
 自动部署或排查安装问题时，可以使用静默参数：
 
 ```powershell
-.\obs-airplay-cast-<版本>-windows-x64-Setup.exe --silent
+.\obs-airplay-cast-<版本>-windows-x64-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ```
 
 ## 从源码安装
 
-先正常关闭 OBS Studio，不要覆盖正在被 OBS 加载的 DLL。然后执行：
+先正常关闭 OBS Studio，不要覆盖正在被 OBS 加载的 DLL。传统 CMake 安装会写入
+`obs-airplay-cast`，已有系统级版本时可能需要管理员权限；普通用户升级建议使用一键安装包。
+然后执行：
 
 ```powershell
 $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
@@ -144,7 +147,8 @@ $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\Co
 
 ## 制作一键安装包
 
-先完成 Windows x64 构建，并把插件安装到本地发布目录：
+先完成 Windows x64 构建，并把插件安装到本地发布目录。安装包由 Inno Setup 6 脚本
+`installer/obs-airplay-cast.iss` 生成：
 
 ```powershell
 $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
@@ -157,7 +161,12 @@ $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\Co
 ```text
 release\obs-airplay-cast-<版本>-windows-x64-Setup.exe
 release\obs-airplay-cast-<版本>-windows-x64-Setup.exe.sha256
+release\obs-airplay-cast-<版本>-windows-x64.zip
+release\obs-airplay-cast-<版本>-windows-x64.zip.sha256
 ```
+
+ZIP 是手动安装包，解压后把顶层 `obs-airplay-cast` 目录放到
+`%ProgramData%\obs-studio\plugins`。
 
 ## 使用
 
@@ -332,8 +341,8 @@ Apache-2.0 不替代 MPEG AAC 必要专利授权。分发包含 AAC 编码器的
 ## 版本说明
 
 - `0.1.3`：新增 `启动OBS自动连接抖音`，未配置时默认勾选，并在接收端未出现或投屏
-  会话断开时每秒重试；安装器增加可重绘的安装步骤、百分比和进度条；设置窗口扫描
-  改为可回收的后台任务，退出和手动停止时会取消轮询。
+  会话断开时每秒重试；一键安装器改为 Inno Setup，普通安装和升级不主动请求 UAC；
+  设置窗口扫描改为可回收的后台任务，退出和手动停止时会取消轮询。
 - `0.1.2`：公开源码版本。包含 FairPlay `mixed` 流密钥修复、首帧延迟移除、
   AAC-ELD `ct=8/spf=480/audioFormat=0x1000000` 音频链路和惰性 helper 初始化。
 - `0.1.1`：修复抖音 raw pair-verify 后的 FairPlay 流密钥和视频连续解码问题。

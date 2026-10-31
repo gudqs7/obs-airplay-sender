@@ -1,51 +1,51 @@
 # Windows 一键安装器
 
-`Build-WindowsInstaller.ps1` 把 CMake 安装目录中的插件文件打成 ZIP，嵌入一个
-64 位 .NET Framework Windows Forms 安装程序，并输出可直接双击的 `Setup.exe`。
+安装包由 Inno Setup 6 生成，脚本为 `obs-airplay-cast.iss`。
+`Build-WindowsInstaller.ps1` 只负责校验发布目录、调用 `ISCC.exe` 和生成 SHA-256，
+不执行安装测试。
 
-安装目标：
+默认安装目标：
 
 ```text
 %ProgramData%\obs-studio\plugins\obs-airplay-cast
 ```
 
-安装器启动时请求一次管理员权限，用于更新系统级 OBS 插件目录。覆盖前会把上一版备份到
-`%ProgramData%\obs-airplay-sender\previous-install`，并注册系统级卸载入口。
+该目录由当前用户创建和维护，因此首次安装、升级和卸载都不需要管理员权限。Inno Setup
+使用固定的 `AppId` 和 `UsePreviousAppDir=yes`，已有用户目录会被继续沿用。
 
-点击“安装”后才会显示当前步骤、百分比和进度条，鼠标不会切换成等待图标。ZIP 解压、
-文件校验、备份、替换、卸载信息注册和启动 OBS 均在后台执行，安装期间窗口保持可重绘；
-只有 OBS 启动调用返回后才显示 100%。完成前不能通过取消按钮或关闭按钮中断。
+如果目标目录中检测到旧版 `bin\64bit\obs-airplay-cast.dll`，安装器会在
+`PrepareToInstall` 阶段调用该目录中的旧版 `Uninstall.exe`。这个旧卸载器自身可能需要
+一次 UAC；清理完成后 Inno Setup 继续安装到同一目录。
 
-安装器从普通权限启动时会重新以管理员权限运行。UAC 结束后，新进程会短暂重试恢复自己的
-前台焦点，成功后立即停止，不会持续抢占其他应用。
-
-安装后的 OBS 设置中，`启动OBS自动连接抖音` 对首次安装和尚未保存该选项的用户默认
-勾选。用户手动取消后该选择会持久保存，后续启动不会被默认值覆盖。
-
-静默安装：
+构建：
 
 ```powershell
-.\obs-airplay-cast-<版本>-windows-x64-Setup.exe --silent
+.\installer\Build-WindowsInstaller.ps1 -Configuration RelWithDebInfo
 ```
 
-静默安装不会启动 OBS。需要安装后启动时追加 `--launch`。
+生成文件：
 
-安装器进度自测：
+```text
+release\obs-airplay-cast-<版本>-windows-x64-Setup.exe
+release\obs-airplay-cast-<版本>-windows-x64-Setup.exe.sha256
+release\obs-airplay-cast-<版本>-windows-x64.zip
+release\obs-airplay-cast-<版本>-windows-x64.zip.sha256
+```
+
+ZIP 是手动安装包，顶层目录为 `obs-airplay-cast`，解压到
+`%ProgramData%\obs-studio\plugins` 即可。ZIP 不包含 PDB、ILK 或 EXP 文件。
+
+如果 Inno Setup 不在默认位置，可以指定编译器：
 
 ```powershell
-.\installer\Test-Installer.ps1 -SetupPath .\release\obs-airplay-cast-<版本>-windows-x64-Setup.exe
+.\installer\Build-WindowsInstaller.ps1 -CompilerPath 'C:\path\to\ISCC.exe'
 ```
 
-UI 与提权焦点回归测试：
+静默安装沿用 Inno Setup 参数：
 
 ```powershell
-.\installer\Test-InstallerUi.ps1 -SetupPath .\release\obs-airplay-cast-<版本>-windows-x64-Setup.exe
-.\installer\Test-InstallerElevation.ps1 -SetupPath .\release\obs-airplay-cast-<版本>-windows-x64-Setup.exe
+.\obs-airplay-cast-<版本>-windows-x64-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ```
-
-`Test-InstallerUi.ps1` 会模拟 OBS 启动阻塞，验证 98% 阶段窗口仍能响应且 100% 不提前出现。
-追加 `-UseInstalledObs` 可验证本机真实 OBS 的启动路径。提权测试模拟父进程向子安装器转移
-前台权限，不会自动操作 Windows UAC 安全桌面。
 
 ## Logo
 
@@ -59,5 +59,4 @@ logo-512.png
 obs-airplay-sender.ico  (64 / 128 / 256)
 ```
 
-只保留 64px 及以上的图标尺寸，不生成 16/32/48px 变体。构建安装器时会嵌入
-64px 图标并设置 EXE 图标。
+构建安装包时使用 `assets/obs-airplay-sender.ico`。
