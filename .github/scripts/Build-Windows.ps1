@@ -79,6 +79,9 @@ function Build {
 
     Log-Group "Fetching fixed dependency sources..."
     & "${ProjectRoot}/scripts/fetch-dependencies.ps1"
+    if (-not $?) {
+        throw "External dependency fetch failed"
+    }
     Log-Group
 
     Log-Group "Configuring ${ProductName}..."

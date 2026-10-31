@@ -96,7 +96,7 @@ $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\Co
 ## 一键安装包
 
 `Package-Windows.ps1` 在 CI 中除了生成便携 ZIP，还会调用
-`installer/Build-WindowsInstaller.ps1` 生成当前用户级 `Setup.exe`。本地构建时：
+`installer/Build-WindowsInstaller.ps1` 生成系统级 `Setup.exe`。本地构建时：
 
 ```powershell
 $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
