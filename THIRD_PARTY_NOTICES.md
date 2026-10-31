@@ -14,34 +14,23 @@ The bridge executable combines the fetched doubletake source with the project-ow
 adapter in `bridge/cmd/obsairplay-bridge`. The LGPLv3 and incorporated GPLv3 texts
 are in `licenses/doubletake-LICENSE.txt` and `licenses/GPL-3.0.txt`.
 
-## Fraunhofer FDK AAC
-
-- Project: https://github.com/mstorsjo/fdk-aac
-- Pinned commit: `c41c3c7516ea8d0d78a53b96b30bed3a29745cc6`
-- Source: fetched by `scripts/fetch-dependencies.ps1`, not vendored in this repository
-- License: Fraunhofer FDK AAC Codec Library software license in
-  `licenses/fdk-aac-NOTICE.txt` and `licenses/fdk-aac-xhe-aac-NOTICE.txt`
-- Used component: AAC-ELD encoder in `obs-airplay-aac-eld.exe`
-
-The pinned upstream source includes `METADATA`, which marks the package as
-having special licensing conditions. Review the complete FDK AAC license and
-upstream metadata before redistribution or commercial use.
-
-The FDK AAC license does not grant patent rights. Distribution and commercial
-use may require separate patent licensing. The complete license text must
-accompany copies of the encoder and its source. Binary releases must also make
-the corresponding FDK AAC source available.
-
-## Evaluated AAC-ELD alternative
+## Ittiam libxaac
 
 - Project: https://github.com/ittiam-systems/libxaac
+- Pinned commit: `2fbadd57bca46693b7a077bcf1513131106d960c`
+- Source: fetched by `scripts/fetch-dependencies.ps1`, not vendored in this repository
 - License: Apache License 2.0
-- Status: not used by the current build
+- Local changes: `patches/libxaac-eld-core.patch`
+- Used component: AAC-ELD encoder in `obs-airplay-aac-eld.exe`
 
-libxaac advertises AAC-ELD encoding support and is the leading candidate for a
-future replacement. It has not yet been validated against the Douyin receiver
-at the current AAC-ELD frame size and bitrate, so this project keeps the
-already-tested FDK AAC path.
+The local patch changes the no-MPS AAC-ELD path from 2:1 ELD-SBR to the core
+encoder so one 1920-byte PCM frame produces one 480-sample raw access unit. The
+encoder has passed Windows x64 build, independent decode, helper protocol and
+Douyin receiver tests.
+
+The Apache-2.0 license and NOTICE text are in `licenses/libxaac-LICENSE.txt`
+and `licenses/libxaac-NOTICE.txt`. Review MPEG AAC patent licensing separately
+before redistribution or commercial use.
 
 ## OBS Studio
 

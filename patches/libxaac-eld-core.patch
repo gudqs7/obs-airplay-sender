@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OBS AirPlay Sender contributors
+Date: Thu, 30 Oct 2026 00:00:00 +0800
+Subject: [PATCH] Use core-only AAC-ELD when MPS is disabled
+
+libxaac currently treats every AAC-ELD configuration without MPS as
+ELD-SBR. That consumes 960 PCM samples at 44.1 kHz to emit a 480-core
+access unit, which is incompatible with the AirPlay/Douyin requirement
+for one 480-sample PCM frame per raw access unit.
+
+Keep the existing ELD-SBR behavior for ELDv2/MPS, but let the core AAC-ELD
+encoder handle the no-MPS case. The OBS AirPlay helper verifies the
+resulting 1920-byte input frame and 44100 Hz time base at startup.
+---
+ encoder/ixheaace_api.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/encoder/ixheaace_api.c b/encoder/ixheaace_api.c
+index 943d6f9..a45baa6 100644
+--- a/encoder/ixheaace_api.c
++++ b/encoder/ixheaace_api.c
+@@ -906,7 +906,7 @@ static IA_ERRORCODE ixheaace_set_config_params(ixheaace_api_struct *pstr_api_str
+       }
+     }
+-    if ((AOT_SBR == pstr_input_config->aot) || (AOT_PS == pstr_input_config->aot) ||
+-        (AOT_AAC_ELD == pstr_input_config->aot)) {
++    if ((AOT_SBR == pstr_input_config->aot) || (AOT_PS == pstr_input_config->aot) ||
++        ((AOT_AAC_ELD == pstr_input_config->aot) && (pstr_input_config->i_use_mps == 1))) {
+       pstr_api_struct->config[ele_idx].aac_classic = 0;
+     }
+     if (pstr_api_struct->config[ele_idx].sample_rate < 32000) {

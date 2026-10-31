@@ -15,31 +15,17 @@ cmake_policy(SET CMP0077 NEW)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
 set(BUILD_PROGRAMS OFF CACHE BOOL "Build command-line programs" FORCE)
 set(
-  FDK_AAC_INSTALL_CMAKE_CONFIG_MODULE
-  OFF
-  CACHE BOOL
-  "Install FDK AAC CMake package configuration"
-  FORCE
-)
-set(
-  FDK_AAC_INSTALL_PKGCONFIG_MODULE
-  OFF
-  CACHE BOOL
-  "Install FDK AAC pkg-config module"
-  FORCE
-)
-set(
   OBS_AIRPLAY_DEPS_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/.deps/source"
   CACHE PATH
-  "Directory containing fetched FDK AAC and doubletake source trees"
+  "Directory containing fetched AAC encoder and doubletake source trees"
 )
-set(FDK_AAC_SOURCE_DIR "${OBS_AIRPLAY_DEPS_DIR}/fdk-aac")
+set(LIBXAAC_SOURCE_DIR "${OBS_AIRPLAY_DEPS_DIR}/libxaac")
 set(DOUBLETAKE_SOURCE_DIR "${OBS_AIRPLAY_DEPS_DIR}/doubletake")
 foreach(
   dependency_dir
   IN ITEMS
-    "${FDK_AAC_SOURCE_DIR}"
+    "${LIBXAAC_SOURCE_DIR}"
     "${DOUBLETAKE_SOURCE_DIR}"
     "${DOUBLETAKE_SOURCE_DIR}/cmd/obsairplay-bridge"
 )
@@ -51,11 +37,18 @@ foreach(
     )
   endif()
 endforeach()
+
 add_subdirectory(
-  "${FDK_AAC_SOURCE_DIR}"
-  "${CMAKE_CURRENT_BINARY_DIR}/fdk-aac"
+  "${LIBXAAC_SOURCE_DIR}"
+  "${CMAKE_CURRENT_BINARY_DIR}/libxaac"
   EXCLUDE_FROM_ALL
 )
+if(MSVC)
+  # The pinned libxaac commit contains non-UTF-8 source bytes and warnings that
+  # are benign on MSVC. Keep the project's warnings-as-errors policy elsewhere.
+  target_compile_options(libxaacenc PRIVATE /WX- /wd4819 /wd4828)
+  target_compile_options(libxaacdec PRIVATE /WX- /wd4819 /wd4828)
+endif()
 
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 
@@ -97,7 +90,13 @@ add_dependencies(${CMAKE_PROJECT_NAME} obs-airplay-bridge)
 
 set(AIRPLAY_ELD_ENCODER "${CMAKE_CURRENT_BINARY_DIR}/obs-airplay-aac-eld.exe")
 add_executable(obs-airplay-aac-eld src/aac-eld-encoder.cpp)
-target_link_libraries(obs-airplay-aac-eld PRIVATE fdk-aac)
+target_link_libraries(obs-airplay-aac-eld PRIVATE libxaacenc)
+target_include_directories(
+  obs-airplay-aac-eld
+  PRIVATE
+    "${LIBXAAC_SOURCE_DIR}/common"
+    "${LIBXAAC_SOURCE_DIR}/encoder"
+)
 target_compile_features(obs-airplay-aac-eld PRIVATE cxx_std_17)
 target_compile_definitions(obs-airplay-aac-eld PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 set_target_properties(
@@ -107,17 +106,6 @@ set_target_properties(
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
 )
 add_dependencies(${CMAKE_PROJECT_NAME} obs-airplay-aac-eld)
-
-add_executable(obs-airplay-aac-eld-probe EXCLUDE_FROM_ALL src/aac-eld-probe.cpp)
-target_link_libraries(obs-airplay-aac-eld-probe PRIVATE fdk-aac)
-target_compile_features(obs-airplay-aac-eld-probe PRIVATE cxx_std_17)
-target_compile_definitions(obs-airplay-aac-eld-probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-set_target_properties(
-  obs-airplay-aac-eld-probe
-  PROPERTIES
-    OUTPUT_NAME "obs-airplay-aac-eld-probe"
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-)
 
 target_sources(
   ${CMAKE_PROJECT_NAME}

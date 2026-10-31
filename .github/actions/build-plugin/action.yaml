@@ -89,6 +89,14 @@ runs:
 
         .github/scripts/Build-Windows.ps1 @BuildArgs
 
+    - name: Test AAC-ELD Helper
+      if: runner.os == 'Windows'
+      shell: pwsh
+      working-directory: ${{ inputs.workingDirectory }}
+      run: |
+        .\tools\aac-eld-helper-test\test-helper.ps1 `
+          -HelperPath ".\build_${{ inputs.target }}\${{ inputs.config }}\obs-airplay-aac-eld.exe"
+
     - name: Create Summary 📊
       if: contains(fromJSON('["Linux", "macOS"]'),runner.os)
       shell: zsh --no-rcs --errexit --pipefail {0}

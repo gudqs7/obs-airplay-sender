@@ -10,7 +10,7 @@ C++ helper 完成 AAC-ELD 编码。目标接收端只有抖音直播伴侣的
 |---|---|---|
 | `obs-airplay-cast.dll` | C++17 / Qt6 | OBS 输出、H.264 编码器、主混音回调、设置窗口 |
 | `obs-airplay-cast-bridge.exe` | Go | mDNS 发现、AirPlay、FairPlay、RTP、时钟和 helper 管理 |
-| `obs-airplay-aac-eld.exe` | C++17 / FDK AAC | 接收 PCM，输出 AAC-ELD 裸帧 |
+| `obs-airplay-aac-eld.exe` | C++17 / libxaac | 接收 PCM，输出 AAC-ELD 裸帧 |
 
 三个进程之间没有共享内存：
 

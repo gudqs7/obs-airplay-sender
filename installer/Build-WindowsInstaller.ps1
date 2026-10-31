@@ -44,8 +44,8 @@ $RequiredFiles = @(
     'THIRD_PARTY_NOTICES.md'
     'licenses/doubletake-LICENSE.txt'
     'licenses/GPL-3.0.txt'
-    'licenses/fdk-aac-NOTICE.txt'
-    'licenses/fdk-aac-xhe-aac-NOTICE.txt'
+    'licenses/libxaac-LICENSE.txt'
+    'licenses/libxaac-NOTICE.txt'
 )
 
 foreach ($RelativePath in $RequiredFiles) {

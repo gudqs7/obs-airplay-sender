@@ -20,10 +20,11 @@
 脚本固定并获取以下上游提交：
 
 - `omarroth/doubletake@5e2f1cbe3e1070bcefec8e549c7baf884727bc00`
-- `mstorsjo/fdk-aac@c41c3c7516ea8d0d78a53b96b30bed3a29745cc6`
+- `ittiam-systems/libxaac@2fbadd57bca46693b7a077bcf1513131106d960c`
 
 doubletake 会应用 `patches/doubletake-obs-airplay.patch`，并复制
-`bridge/cmd/obsairplay-bridge` 到依赖模块中编译。
+`bridge/cmd/obsairplay-bridge` 到依赖模块中编译。libxaac 会应用
+`patches/libxaac-eld-core.patch`，关闭无 MPS 模式下的 2:1 ELD-SBR。
 
 ## 配置和构建
 
@@ -37,13 +38,11 @@ $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\Co
 
 - `obs-airplay-cast`：OBS 插件 DLL。
 - `obs-airplay-bridge`：Go bridge。
-- `obs-airplay-aac-eld`：FDK AAC-ELD helper。
-
-`obs-airplay-aac-eld-probe` 是显式测试目标，不会包含在默认构建中。
+- `obs-airplay-aac-eld`：libxaac AAC-ELD helper。
 
 ## Go bridge 编译检查
 
-当前 bridge 使用 `CGO_ENABLED=0`，不依赖系统安装的 libfdk-aac：
+当前 bridge 使用 `CGO_ENABLED=0`，不链接任何 AAC 编码库：
 
 ```powershell
 Push-Location .deps\source\doubletake
@@ -65,22 +64,24 @@ Remove-Item Env:GOOS, Env:CGO_ENABLED
 Pop-Location
 ```
 
-## AAC-ELD 往返测试
+## AAC-ELD helper 测试
 
 ```powershell
 $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
-& $cmake --build .\build_x64 --config RelWithDebInfo --target obs-airplay-aac-eld-probe --parallel
-.\build_x64\RelWithDebInfo\obs-airplay-aac-eld-probe.exe
+& $cmake --build .\build_x64 --config RelWithDebInfo --target obs-airplay-aac-eld --parallel
+.\tools\aac-eld-helper-test\test-helper.ps1 `
+  -HelperPath .\build_x64\RelWithDebInfo\obs-airplay-aac-eld.exe
 ```
 
 通过时应看到类似输出：
 
 ```text
-encoded=348 bytes/frame decoded=19200 samples peak=16461 rms=11436.9
+ready=480 frames=20 bytes=7005 frame-bytes=346-347
 ```
 
-`decoded=19200` 等于 20 帧 × 480 samples × 2 声道。峰值必须明显大于 0，才能排除
-编码器输出静音。
+测试会验证 `READY 480`、4 字节长度前缀、每帧 346-347 字节和完整 20 帧输出。
+编码器实现、补丁原因和抖音验收条件见
+[AAC_ELD_ENCODER.md](AAC_ELD_ENCODER.md)。
 
 ## 安装测试
 
@@ -91,7 +92,8 @@ $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\Co
 & $cmake --install build_x64 --config RelWithDebInfo --prefix "$env:ProgramData\obs-studio\plugins"
 ```
 
-安装会带上 README、根许可证、第三方通知、doubletake 许可证和 FDK AAC 许可证。
+安装会带上 README、根许可证、第三方通知、doubletake 许可证和 libxaac
+Apache-2.0 许可证/NOTICE。
 
 ## 一键安装包
 
@@ -150,10 +152,10 @@ bridge 日志位于 `%TEMP%\obs-airplay-cast-bridge.log`，每次 bridge 启动�
 
 1. 运行 Windows CMake `RelWithDebInfo` 全量构建。
 2. 运行 Go bridge 编译检查和 `internal/airplay` 交叉编译测试。
-3. 运行 AAC-ELD 编码到解码往返测试，确认峰值非零。
+3. 运行 AAC-ELD helper stdio 协议测试，确认 `READY 480` 和逐帧长度正确。
 4. 检查三个产物版本一致，且 AAC helper 与 bridge 被复制到同一目录。
 5. 确认安装结果包含 `LICENSE`、`THIRD_PARTY_NOTICES.md`、
-   `licenses\` 下的 doubletake、GPLv3 和 FDK AAC 许可证文本。
+   `licenses\` 下的 doubletake、GPLv3 和 libxaac 许可证文本。
 6. 审计提交内容，排除日志、用户目录、凭据、PDB、EXE、缓存和 `.deps`。
 7. 若创建二进制发布包，核对 DLL、bridge、helper 哈希和 release 包内文件。
 
@@ -161,9 +163,8 @@ bridge 日志位于 `%TEMP%\obs-airplay-cast-bridge.log`，每次 bridge 启动�
 
 - 根插件使用 GPL v2 许可证文本。
 - doubletake 使用 LGPL-3.0-or-later，源码和许可证必须保留。
-- FDK AAC 要求保留完整 NOTICE；顶层 `METADATA` 还标有特殊许可条件。
-- 二进制分发需要提供对应 FDK AAC 源码，并同时携带两份 NOTICE。
-- FDK AAC 不授予专利许可，商业分发前应单独评估 MPEG AAC 专利授权。
+- libxaac 使用 Apache-2.0，二进制分发必须携带许可证和 NOTICE。
+- Apache-2.0 不替代 MPEG AAC 必要专利授权，商业分发前应单独评估。
 
 ## 代码结构
 
@@ -173,7 +174,7 @@ bridge 日志位于 `%TEMP%\obs-airplay-cast-bridge.log`，每次 bridge 启动�
 | `bridge/` | 项目自有的 Go bridge 入口和 IPC 协议 |
 | `patches/` | 针对固定 doubletake 上游提交的最小协议补丁 |
 | `scripts/` | 固定版本第三方依赖获取脚本 |
-| `.deps/source/` | 构建时获取的 doubletake 和 FDK AAC，受 `.gitignore` 排除 |
-| `tools/` | IPC、音频会话和窗口诊断探针 |
+| `.deps/source/` | 构建时获取的 doubletake 和 libxaac，受 `.gitignore` 排除 |
+| `tools/` | IPC、音频会话、窗口诊断和 AAC-ELD helper 协议测试 |
 | `cmake/` | OBS 插件模板的 CMake 配置 |
 | `.github/` | Windows 构建和格式检查工作流 |

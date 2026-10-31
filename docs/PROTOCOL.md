@@ -1,7 +1,7 @@
 # 协议约束
 
 本文记录当前已通过抖音直播伴侣实测的发送端约束。修改协议相关代码时，必须同时运行
-Go 包编译检查和 AAC-ELD 往返测试。
+Go 包编译检查和 AAC-ELD helper stdio 协议测试。
 
 ## FairPlay 与 pair-verify
 
@@ -52,8 +52,8 @@ HEVC 不属于当前抖音验收路径。
 | PCM | 44100 Hz、16-bit、双声道交错 |
 | 每帧 PCM | `480 × 2 × 2 = 1920` 字节 |
 | 编码码率 | 256000 bit/s |
-| FDK AOT | `AOT_ER_AAC_ELD` (39) |
-| FDK transmux | `TT_MP4_RAW` |
+| libxaac AOT | AAC-ELD (39) |
+| 输出传输 | raw access unit，无 ADTS |
 
 旧 ALAC 链路使用 `ct=2`、`spf=352`。它在抖音侧可能完成部分协商，但没有可用的音频
 解码输出，因此不能作为抖音无声问题的回退方案。
@@ -75,7 +75,7 @@ helper 文件名必须是 `obs-airplay-aac-eld.exe`。bridge 按以下顺序查�
 
 启动后：
 
-1. helper 初始化 FDK encoder。
+1. helper 初始化 libxaac AAC-ELD encoder。
 2. stdout 输出一行 ASCII `READY 480\n`。
 3. bridge 每次向 stdin 写入恰好 1920 字节 S16LE 交错 PCM。
 4. helper 每次向 stdout 写入 4 字节 little-endian AAC 帧长度。
@@ -83,19 +83,23 @@ helper 文件名必须是 `obs-airplay-aac-eld.exe`。bridge 按以下顺序查�
 
 不得输出 ADTS 头，不得自动增加额外分隔符，也不要在 `READY` 之前输出编码数据。
 
-FDK 配置：
+libxaac 配置：
 
 ```text
-AACENC_AOT             = AOT_ER_AAC_ELD (39)
-AACENC_SAMPLERATE      = 44100
-AACENC_CHANNELMODE     = MODE_2
-AACENC_CHANNELORDER    = 1
-AACENC_BITRATE         = 256000
-AACENC_TRANSMUX        = TT_MP4_RAW
-AACENC_SBR_MODE        = 0
-AACENC_GRANULE_LENGTH  = 480
-AACENC_AFTERBURNER     = 1
+AOT                    = 39
+sample rate            = 44100
+channels               = 2
+samples per frame      = 480
+bitrate                = 256000
+MPS                    = 0
+ADTS                   = 0
+expected input bytes   = 1920
+expected ASC bytes     = 4
 ```
+
+无 MPS 路径必须使用 `patches/libxaac-eld-core.patch` 的 core AAC-ELD 模式，不能
+回退到 2:1 ELD-SBR。helper 会在输出 `READY` 前校验输入帧长度、采样率、下采样比和
+ASC 长度。
 
 ## 惰性初始化
 

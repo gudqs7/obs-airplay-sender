@@ -1,15 +1,20 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
-#include <vector>
 
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
+#include <malloc.h>
 #endif
 
-#include <aacenc_lib.h>
+extern "C" {
+#include "ixheaac_error_standards.h"
+#include "ixheaac_type_def.h"
+#include "ixheaace_api.h"
+}
 
 namespace {
 
@@ -19,7 +24,8 @@ constexpr int kSamplesPerFrame = 480;
 constexpr int kBytesPerSample = 2;
 constexpr int kPCMFrameBytes =
 	kSamplesPerFrame * kChannels * kBytesPerSample;
-constexpr int kMaxEncodedBytes = 8192;
+constexpr int kBitrate = 256000;
+constexpr int kExpectedASCBytes = 4;
 
 bool write_all(const void *data, size_t size)
 {
@@ -34,7 +40,7 @@ bool write_all(const void *data, size_t size)
 	return true;
 }
 
-void write_u32_le(std::uint32_t value)
+bool write_u32_le(std::uint32_t value)
 {
 	const std::array<std::uint8_t, 4> bytes = {
 		static_cast<std::uint8_t>(value),
@@ -42,14 +48,53 @@ void write_u32_le(std::uint32_t value)
 		static_cast<std::uint8_t>(value >> 16),
 		static_cast<std::uint8_t>(value >> 24),
 	};
-	write_all(bytes.data(), bytes.size());
+	return write_all(bytes.data(), bytes.size());
 }
 
-bool fail(AACENC_ERROR error, const char *operation)
+pVOID aligned_malloc(UWORD32 size, UWORD32 alignment)
 {
-	std::fprintf(stderr, "AAC-ELD %s failed: FDK error %d\n", operation,
-		     static_cast<int>(error));
-	return false;
+#ifdef _WIN32
+	return _aligned_malloc(size, alignment);
+#else
+	void *ptr = nullptr;
+	if (posix_memalign(&ptr, alignment, size) != 0)
+		return nullptr;
+	return ptr;
+#endif
+}
+
+VOID aligned_free(pVOID ptr)
+{
+#ifdef _WIN32
+	_aligned_free(ptr);
+#else
+	std::free(ptr);
+#endif
+}
+
+void configure_encoder(ixheaace_input_config &input, ixheaace_output_config &output)
+{
+	std::memset(&input, 0, sizeof(input));
+	std::memset(&output, 0, sizeof(output));
+
+	input.ui_pcm_wd_sz = 16;
+	input.i_bitrate = kBitrate;
+	input.frame_length = kSamplesPerFrame;
+	input.aot = AOT_AAC_ELD;
+	input.i_channels = kChannels;
+	input.i_samp_freq = kSampleRate;
+	input.i_use_mps = 0;
+	input.i_mps_tree_config = -1;
+	input.i_use_adts = 0;
+	input.i_use_es = 1;
+
+	input.aac_config.bitrate = kBitrate;
+	input.aac_config.use_tns = 1;
+	input.aac_config.inv_quant = 2;
+	input.aac_config.bitreservoir_size = -1;
+
+	output.malloc_xheaace = aligned_malloc;
+	output.free_xheaace = aligned_free;
 }
 
 } // namespace
@@ -62,112 +107,68 @@ int main()
 #endif
 	std::setvbuf(stdout, nullptr, _IONBF, 0);
 
-	HANDLE_AACENCODER encoder = nullptr;
-	AACENC_ERROR error = aacEncOpen(&encoder, 0, kChannels);
-	if (error != AACENC_OK)
-		return fail(error, "open") ? 0 : 1;
+	ixheaace_input_config input = {};
+	ixheaace_output_config output = {};
+	configure_encoder(input, output);
 
-	struct EncoderCloser {
-		HANDLE_AACENCODER *encoder;
-		~EncoderCloser()
-		{
-			if (*encoder != nullptr)
-				aacEncClose(encoder);
-		}
-	} closer{&encoder};
-
-	const struct {
-		AACENC_PARAM parameter;
-		UINT value;
-		const char *name;
-	} settings[] = {
-		{AACENC_AOT, AOT_ER_AAC_ELD, "AOT"},
-		{AACENC_SAMPLERATE, kSampleRate, "sample rate"},
-		{AACENC_CHANNELMODE, MODE_2, "channel mode"},
-		{AACENC_CHANNELORDER, 1, "channel order"},
-		{AACENC_BITRATE, 256000, "bitrate"},
-		{AACENC_TRANSMUX, TT_MP4_RAW, "transmux"},
-		{AACENC_SBR_MODE, 0, "SBR mode"},
-		{AACENC_GRANULE_LENGTH, kSamplesPerFrame, "granule length"},
-		{AACENC_AFTERBURNER, 1, "afterburner"},
-	};
-	for (const auto &setting : settings) {
-		error = aacEncoder_SetParam(encoder, setting.parameter, setting.value);
-		if (error != AACENC_OK) {
-			std::fprintf(stderr, "AAC-ELD setting %s=%u failed: FDK error %d\n",
-				     setting.name, setting.value, static_cast<int>(error));
-			return 1;
-		}
-	}
-
-	error = aacEncEncode(encoder, nullptr, nullptr, nullptr, nullptr);
-	if (error != AACENC_OK)
-		return fail(error, "initialize") ? 0 : 1;
-
-	AACENC_InfoStruct info = {};
-	error = aacEncInfo(encoder, &info);
-	if (error != AACENC_OK)
-		return fail(error, "read info") ? 0 : 1;
-	if (info.frameLength != kSamplesPerFrame) {
-		std::fprintf(stderr, "AAC-ELD selected %u samples per frame, want %d\n",
-			     info.frameLength, kSamplesPerFrame);
+	IA_ERRORCODE error = ixheaace_create(&input, &output);
+	if (error != IA_NO_ERROR) {
+		std::fprintf(stderr, "AAC-ELD libxaac open failed: 0x%08x\n",
+			     static_cast<unsigned int>(error));
 		return 1;
 	}
+
+	struct EncoderCloser {
+		ixheaace_output_config *output;
+		~EncoderCloser()
+		{
+			if (output->pv_ia_process_api_obj != nullptr)
+				ixheaace_delete(output);
+		}
+	} closer{&output};
+
+	if (output.input_size != kPCMFrameBytes ||
+	    output.samp_freq != kSampleRate || output.down_sampling_ratio != 1.0f ||
+	    output.i_out_bytes != kExpectedASCBytes) {
+		std::fprintf(
+			stderr,
+			"AAC-ELD libxaac selected an incompatible mode: "
+			"input=%d rate=%d ratio=%.2f asc=%d\n",
+			output.input_size, output.samp_freq,
+			output.down_sampling_ratio, output.i_out_bytes);
+		return 1;
+	}
+
+	auto *input_buffer = static_cast<WORD16 *>(
+		output.mem_info_table[IA_MEMTYPE_INPUT].mem_ptr);
+	const auto *output_buffer = static_cast<const std::uint8_t *>(
+		output.mem_info_table[IA_MEMTYPE_OUTPUT].mem_ptr);
 
 	std::printf("READY %d\n", kSamplesPerFrame);
 	std::fflush(stdout);
 
 	std::array<std::uint8_t, kPCMFrameBytes> pcm = {};
-	std::array<std::uint8_t, kMaxEncodedBytes> output = {};
 	for (;;) {
 		const size_t read = std::fread(pcm.data(), 1, pcm.size(), stdin);
 		if (read == 0 && std::feof(stdin))
 			return 0;
 		if (read != pcm.size()) {
-			std::fprintf(stderr, "AAC-ELD PCM read returned %zu bytes\n", read);
+			std::fprintf(stderr, "AAC-ELD libxaac PCM read returned %zu bytes\n",
+				     read);
 			return 1;
 		}
 
-		AACENC_BufDesc input_description = {};
-		AACENC_BufDesc output_description = {};
-		AACENC_InArgs input_arguments = {};
-		AACENC_OutArgs output_arguments = {};
-		void *input_buffers[] = {pcm.data()};
-		void *output_buffers[] = {output.data()};
-		INT input_identifiers[] = {IN_AUDIO_DATA};
-		INT output_identifiers[] = {OUT_BITSTREAM_DATA};
-		INT input_sizes[] = {static_cast<INT>(pcm.size())};
-		INT output_sizes[] = {static_cast<INT>(output.size())};
-		INT input_element_sizes[] = {static_cast<INT>(sizeof(INT_PCM))};
-		INT output_element_sizes[] = {1};
-
-		input_description.numBufs = 1;
-		input_description.bufs = input_buffers;
-		input_description.bufferIdentifiers = input_identifiers;
-		input_description.bufSizes = input_sizes;
-		input_description.bufElSizes = input_element_sizes;
-
-		output_description.numBufs = 1;
-		output_description.bufs = output_buffers;
-		output_description.bufferIdentifiers = output_identifiers;
-		output_description.bufSizes = output_sizes;
-		output_description.bufElSizes = output_element_sizes;
-
-		input_arguments.numInSamples = kSamplesPerFrame * kChannels;
-		error = aacEncEncode(encoder, &input_description, &output_description,
-				     &input_arguments, &output_arguments);
-		if (error != AACENC_OK)
-			return fail(error, "encode") ? 0 : 1;
-		if (output_arguments.numOutBytes <= 0 ||
-		    output_arguments.numOutBytes > kMaxEncodedBytes) {
-			std::fprintf(stderr, "AAC-ELD returned invalid output size %d\n",
-				     output_arguments.numOutBytes);
+		std::memcpy(input_buffer, pcm.data(), pcm.size());
+		error = ixheaace_process(output.pv_ia_process_api_obj, &input, &output);
+		if (error != IA_NO_ERROR || output.i_out_bytes <= 0) {
+			std::fprintf(stderr,
+				     "AAC-ELD libxaac encode failed: 0x%08x output=%d\n",
+				     static_cast<unsigned int>(error), output.i_out_bytes);
 			return 1;
 		}
 
-		write_u32_le(static_cast<std::uint32_t>(output_arguments.numOutBytes));
-		if (!write_all(output.data(),
-			       static_cast<size_t>(output_arguments.numOutBytes)))
+		if (!write_u32_le(static_cast<std::uint32_t>(output.i_out_bytes)) ||
+		    !write_all(output_buffer, static_cast<size_t>(output.i_out_bytes)))
 			return 1;
 	}
 }

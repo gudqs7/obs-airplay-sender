@@ -32,20 +32,19 @@
 - 构建时需要 Visual Studio 2022 C++ 工具链、Windows 10/11 SDK、CMake 3.28+、
   Go 1.23+ 和 Git
 
-## AAC-ELD 实现选择
+## AAC-ELD 编码器
 
-当前仍使用已经通过抖音直播伴侣实测的 Fraunhofer FDK AAC，固定到上游提交
-`c41c3c7516ea8d0d78a53b96b30bed3a29745cc6`。第三方源码不存入本仓库，构建前由
-`scripts/fetch-dependencies.ps1` 获取。
+当前使用 [`ittiam-systems/libxaac`](https://github.com/ittiam-systems/libxaac)，固定到
+上游提交 `2fbadd57bca46693b7a077bcf1513131106d960c`。第三方源码不存入本仓库，
+构建前由 `scripts/fetch-dependencies.ps1` 获取，并应用
+[`patches/libxaac-eld-core.patch`](patches/libxaac-eld-core.patch)。
 
-已调研的其他实现：
+该补丁关闭无 MPS AAC-ELD 路径中的 2:1 ELD-SBR，使 1920 字节 PCM 帧对应一个
+44.1 kHz、480-sample、256 kbps 的原始 AAC-ELD access unit。当前实现已经通过
+Windows x64 构建、helper stdio 协议测试和抖音直播伴侣实际投屏验收。
 
-- [`ittiam-systems/libxaac`](https://github.com/ittiam-systems/libxaac) 使用
-  Apache-2.0，README 声明支持 AAC-LD、AAC-ELD 和 AAC-ELDv2，是最有潜力的后续替代。
-  当前尚未接入本项目，也没有经过抖音 44.1 kHz、480 samples/frame、256 kbps 的往返
-  和接收端验收，因此本轮不替换已实测链路。
-- FFmpeg 原生 AAC 编码器只支持 AAC-LC；FFmpeg 的 `libfdk_aac` 包装层仍然依赖 FDK。
-- Apple AudioToolbox 的 AAC-ELD 编码路径不适用于 Windows x64 OBS 构建。
+编码器实现和验证细节见
+[docs/AAC_ELD_ENCODER.md](docs/AAC_ELD_ENCODER.md)。
 
 ## 构建
 
@@ -60,7 +59,7 @@
 | 依赖 | 上游 | 固定提交 |
 |---|---|---|
 | doubletake | `omarroth/doubletake` | `5e2f1cbe3e1070bcefec8e549c7baf884727bc00` |
-| FDK AAC | `mstorsjo/fdk-aac` | `c41c3c7516ea8d0d78a53b96b30bed3a29745cc6` |
+| libxaac | `ittiam-systems/libxaac` | `2fbadd57bca46693b7a077bcf1513131106d960c` |
 
 doubletake 还需要应用本项目的最小补丁
 [`patches/doubletake-obs-airplay.patch`](patches/doubletake-obs-airplay.patch)；脚本会把
@@ -300,6 +299,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 - 接收端能力、抖音客户端版本和局域网环境都可能影响发现和连接。
 - Windows 音频会话探针可能把实际有声的抖音会话报告为 `peak=0`，不能单独作为失败依据。
 - 项目不提供对第三方接收端未来协议变化的兼容性保证。
+- libxaac 依赖固定的本地 AAC-ELD 补丁；升级上游提交后必须重新运行 helper 协议和
+  抖音实机验收。
 
 ## 许可证
 
@@ -309,14 +310,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   `LGPL-3.0-or-later`；本项目只提交适配补丁，许可证文本见
   `licenses/doubletake-LICENSE.txt` 和 `licenses/GPL-3.0.txt`。
 - AAC-ELD 编码器来自
-  [`mstorsjo/fdk-aac`](https://github.com/mstorsjo/fdk-aac)，许可证文本见
-  `licenses/fdk-aac-NOTICE.txt` 和 `licenses/fdk-aac-xhe-aac-NOTICE.txt`。
+  [`ittiam-systems/libxaac`](https://github.com/ittiam-systems/libxaac)，
+  使用 Apache-2.0；许可证和 NOTICE 见 `licenses/libxaac-LICENSE.txt` 与
+  `licenses/libxaac-NOTICE.txt`。
 - OBS Studio API 依其 GPL 条款使用。
 
-FDK AAC 许可证不授予专利许可。分发 AAC 编码器或将其用于商业产品前，应单独评估
-MPEG AAC 专利授权；同时复核 FDK AAC 上游提交中的 `METADATA` 特殊许可提示。
-如果发布包含 `obs-airplay-aac-eld.exe` 的二进制包，必须同时提供 FDK AAC 对应源码的
-获取方式或源码副本，不能只链接本项目仓库。
+Apache-2.0 不替代 MPEG AAC 必要专利授权。分发包含 AAC 编码器的二进制包或将其用于
+商业产品前，应单独评估 MPEG AAC 专利授权。
 完整第三方说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 版本说明
