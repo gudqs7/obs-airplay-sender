@@ -12,10 +12,22 @@ include(defaults)
 include(helpers)
 
 cmake_policy(SET CMP0077 NEW)
-set(BUILD_SHARED_LIBS OFF)
-set(BUILD_PROGRAMS OFF)
-set(FDK_AAC_INSTALL_CMAKE_CONFIG_MODULE OFF)
-set(FDK_AAC_INSTALL_PKGCONFIG_MODULE OFF)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
+set(BUILD_PROGRAMS OFF CACHE BOOL "Build command-line programs" FORCE)
+set(
+  FDK_AAC_INSTALL_CMAKE_CONFIG_MODULE
+  OFF
+  CACHE BOOL
+  "Install FDK AAC CMake package configuration"
+  FORCE
+)
+set(
+  FDK_AAC_INSTALL_PKGCONFIG_MODULE
+  OFF
+  CACHE BOOL
+  "Install FDK AAC pkg-config module"
+  FORCE
+)
 set(
   OBS_AIRPLAY_DEPS_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/.deps/source"
