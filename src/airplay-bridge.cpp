@@ -20,6 +20,7 @@ constexpr uint16_t kIpcAudio = 3;
 constexpr uint16_t kIpcStop = 4;
 constexpr uint16_t kIpcClock = 5;
 constexpr uint16_t kIpcDiscover = 6;
+constexpr uint16_t kIpcStatus = 7;
 constexpr uint16_t kIpcResponse = 100;
 constexpr size_t kMaxQueuedBytes = 64 * 1024 * 1024;
 
@@ -378,7 +379,7 @@ bool AirPlayBridge::SendStart(const AirPlayBridgeConfig &config, AirPlaySessionI
 	return true;
 }
 
-bool AirPlayBridge::ReceiveResponse(std::string &payload, std::string &error)
+bool AirPlayBridge::ReceiveResponse(std::string &payload, std::string &error, int timeout_ms)
 {
 	std::lock_guard<std::mutex> lock(io_mutex_);
 	if (socket_ == INVALID_SOCKET) {
@@ -386,25 +387,94 @@ bool AirPlayBridge::ReceiveResponse(std::string &payload, std::string &error)
 		return false;
 	}
 
+	DWORD timeout = static_cast<DWORD>(std::max(timeout_ms, 1));
+	if (setsockopt(socket_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&timeout),
+		       sizeof(timeout)) == SOCKET_ERROR) {
+		error = "Could not set AirPlay bridge response timeout";
+		return false;
+	}
+
 	std::array<uint8_t, kIpcHeaderBytes> raw = {};
-	if (!recv_all(socket_, raw.data(), raw.size())) {
+	const bool received = recv_all(socket_, raw.data(), raw.size());
+	DWORD default_timeout = 30000;
+	const auto restore_timeout = [&]() {
+		setsockopt(socket_, SOL_SOCKET, SO_RCVTIMEO,
+			   reinterpret_cast<const char *>(&default_timeout), sizeof(default_timeout));
+	};
+	if (!received) {
+		restore_timeout();
 		error = "Timed out waiting for AirPlay bridge";
 		return false;
 	}
 	if (get_u32(raw.data()) != kIpcMagic || get_u16(raw.data() + 4) != kIpcResponse) {
+		restore_timeout();
 		error = "Invalid response header from AirPlay bridge";
 		return false;
 	}
 	const uint32_t length = get_u32(raw.data() + 8);
 	if (length > 1u << 20) {
+		restore_timeout();
 		error = "AirPlay bridge response is too large";
 		return false;
 	}
 	payload.assign(length, '\0');
 	if (length && !recv_all(socket_, reinterpret_cast<uint8_t *>(payload.data()), length)) {
+		restore_timeout();
 		error = "Could not read AirPlay bridge response";
 		return false;
 	}
+	restore_timeout();
+	return true;
+}
+
+bool AirPlayBridge::SessionStatus(AirPlaySessionStatus &status, std::string &error)
+{
+	std::lock_guard<std::mutex> operation(operation_mutex_);
+	if (!Connected()) {
+		error = "AirPlay bridge is not running";
+		return false;
+	}
+	if (!SendPacket(kIpcStatus, 0, nullptr, 0)) {
+		error = "Could not query AirPlay bridge session status";
+		return false;
+	}
+
+	std::string response;
+	if (!ReceiveResponse(response, error, 2000))
+		return false;
+
+	obs_data_t *result = obs_data_create_from_json(response.c_str());
+	if (!result) {
+		error = "Invalid session status response from AirPlay bridge";
+		return false;
+	}
+	const bool ok = obs_data_get_bool(result, "ok");
+	const char *session = obs_data_get_string(result, "session");
+	const char *message = obs_data_get_string(result, "message");
+	if (!ok) {
+		error = message && *message ? message : "AirPlay bridge session status failed";
+		obs_data_release(result);
+		return false;
+	}
+
+	if (strcmp(session, "running") == 0) {
+		status = AirPlaySessionStatus::Running;
+	} else if (strcmp(session, "idle") == 0) {
+		status = AirPlaySessionStatus::Idle;
+	} else if (strcmp(session, "disconnected") == 0) {
+		status = AirPlaySessionStatus::Disconnected;
+		if (message && *message)
+			error = message;
+	} else if (strcmp(session, "stopped") == 0) {
+		status = AirPlaySessionStatus::Stopped;
+		if (message && *message)
+			error = message;
+	} else {
+		error = "Unknown AirPlay bridge session status";
+		obs_data_release(result);
+		return false;
+	}
+	obs_data_release(result);
 	return true;
 }
 

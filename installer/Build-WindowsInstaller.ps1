@@ -4,7 +4,8 @@ param(
     [string] $Configuration = 'RelWithDebInfo',
     [string] $ReleaseDirectory,
     [string] $OutputDirectory,
-    [string] $Version
+    [string] $Version,
+    [switch] $KeepTemporary
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +29,9 @@ $ReleaseDirectory = [System.IO.Path]::GetFullPath($ReleaseDirectory)
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 $PluginDirectory = Join-Path $ReleaseDirectory 'obs-airplay-cast'
 $Csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+$AssetsDirectory = Join-Path $PSScriptRoot 'assets'
+$LogoImage = Join-Path $AssetsDirectory 'logo-64.png'
+$LogoIcon = Join-Path $AssetsDirectory 'obs-airplay-sender.ico'
 
 if (!(Test-Path -LiteralPath $Csc -PathType Leaf)) {
     throw "找不到 .NET Framework x64 C# 编译器：$Csc"
@@ -47,6 +51,12 @@ $RequiredFiles = @(
     'licenses/libxaac-LICENSE.txt'
     'licenses/libxaac-NOTICE.txt'
 )
+
+foreach ($AssetPath in @($LogoImage, $LogoIcon)) {
+    if (!(Test-Path -LiteralPath $AssetPath -PathType Leaf)) {
+        throw "安装器资源缺失，缺少：$AssetPath"
+    }
+}
 
 foreach ($RelativePath in $RequiredFiles) {
     $Path = Join-Path $PluginDirectory $RelativePath
@@ -69,8 +79,30 @@ try {
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 
     Copy-Item -LiteralPath $PluginDirectory -Destination $PayloadRoot -Recurse
-    Get-ChildItem -LiteralPath $PayloadRoot -Recurse -File -Include '*.pdb', '*.ilk', '*.exp' |
+    Get-ChildItem -LiteralPath $PayloadRoot -Recurse -File |
+        Where-Object { $_.Extension -in @('.pdb', '.ilk', '.exp') } |
         Remove-Item -Force
+
+    # Keep compatibility with OBS data-root resolution variants used by older
+    # plugin loaders. The canonical location remains data/locale.
+    $PayloadPluginDirectory = Join-Path $PayloadRoot 'obs-airplay-cast'
+    $LocaleSource = Join-Path $PayloadPluginDirectory 'data/locale'
+    foreach ($RelativePath in @(
+        'locale'
+        'bin/64bit/locale'
+        'data/obs-plugins/obs-airplay-cast/locale'
+    )) {
+        $LocaleTarget = Join-Path $PayloadPluginDirectory $RelativePath
+        New-Item -ItemType Directory -Path $LocaleTarget -Force | Out-Null
+        Copy-Item -Path (Join-Path $LocaleSource '*.ini') -Destination $LocaleTarget -Force
+    }
+
+    foreach ($RelativePath in $RequiredFiles) {
+        $PayloadPath = Join-Path $PayloadPluginDirectory $RelativePath
+        if (!(Test-Path -LiteralPath $PayloadPath -PathType Leaf)) {
+            throw "安装器载荷缺少文件：$PayloadPath"
+        }
+    }
 
     Compress-Archive -Path (Join-Path $PayloadRoot 'obs-airplay-cast/*') `
         -DestinationPath $PayloadZip -CompressionLevel Optimal
@@ -87,7 +119,7 @@ try {
 using System.Reflection;
 
 [assembly: AssemblyTitle("OBS AirPlay Sender Setup")]
-[assembly: AssemblyDescription("OBS AirPlay Sender 一键安装程序")]
+[assembly: AssemblyDescription("OBS AirPlay Sender one-click installer")]
 [assembly: AssemblyProduct("OBS AirPlay Sender")]
 [assembly: AssemblyCompany("gudqs7")]
 [assembly: AssemblyCopyright("GPL-2.0")]
@@ -103,6 +135,7 @@ using System.Reflection;
         '/optimize+'
         '/codepage:65001'
         "/win32manifest:$PSScriptRoot\app.manifest"
+        "/win32icon:$LogoIcon"
         "/reference:System.IO.Compression.dll"
         "/reference:System.IO.Compression.FileSystem.dll"
     )
@@ -122,6 +155,7 @@ using System.Reflection;
     $SetupCscArguments = $CommonCscArguments + @(
         "/resource:$PayloadZip,OBSAirPlay.Payload.zip"
         "/resource:$UninstallerPath,OBSAirPlay.Uninstaller.exe"
+        "/resource:$LogoImage,OBSAirPlay.Logo.64.png"
         "/out:$SetupPath"
         (Join-Path $PSScriptRoot 'Setup.cs')
         $VersionFile
@@ -139,7 +173,10 @@ using System.Reflection;
     Write-Host "SHA256:    $Hash"
 }
 finally {
-    if (Test-Path -LiteralPath $TemporaryRoot) {
+    if (!$KeepTemporary -and (Test-Path -LiteralPath $TemporaryRoot)) {
         Remove-Item -LiteralPath $TemporaryRoot -Recurse -Force
+    }
+    elseif ($KeepTemporary) {
+        Write-Host "Temporary installer build data kept at: $TemporaryRoot"
     }
 }

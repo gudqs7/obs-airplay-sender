@@ -12,6 +12,8 @@
 #include <util/config-file.h>
 #include <util/platform.h>
 
+#include "airplay-settings.hpp"
+
 namespace {
 
 constexpr const char *kTargetKey = "Target";
@@ -19,6 +21,7 @@ constexpr const char *kTargetIPKey = "TargetIP";
 constexpr const char *kTargetPortKey = "TargetPort";
 constexpr const char *kFPSKey = "FPS";
 constexpr const char *kBitrateKey = "BitrateKbps";
+constexpr const char *kAutoCastOnObsStartKey = "AutoCastOnObsStart";
 
 struct AirPlayOutputContext {
 	obs_output_t *output = nullptr;
@@ -29,9 +32,7 @@ AirPlayCast *g_cast = nullptr;
 
 long long elapsed_ms(std::chrono::steady_clock::time_point start)
 {
-	return std::chrono::duration_cast<std::chrono::milliseconds>(
-		       std::chrono::steady_clock::now() - start)
-		.count();
+	return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
 }
 
 int normalized_dimension(int value)
@@ -40,8 +41,7 @@ int normalized_dimension(int value)
 	return value < 2 ? 2 : value;
 }
 
-std::pair<int, int> fitting_size(const obs_video_info &video, int receiver_width,
-				 int receiver_height)
+std::pair<int, int> fitting_size(const obs_video_info &video, int receiver_width, int receiver_height)
 {
 	if (receiver_width <= 0 || receiver_height <= 0) {
 		receiver_width = 1920;
@@ -50,9 +50,8 @@ std::pair<int, int> fitting_size(const obs_video_info &video, int receiver_width
 	if (video.base_width <= 0 || video.base_height <= 0)
 		return {normalized_dimension(receiver_width), normalized_dimension(receiver_height)};
 
-	const double scale =
-		std::min({static_cast<double>(receiver_width) / video.base_width,
-			  static_cast<double>(receiver_height) / video.base_height, 1.0});
+	const double scale = std::min({static_cast<double>(receiver_width) / video.base_width,
+				       static_cast<double>(receiver_height) / video.base_height, 1.0});
 	return {normalized_dimension(static_cast<int>(std::lround(video.base_width * scale))),
 		normalized_dimension(static_cast<int>(std::lround(video.base_height * scale)))};
 }
@@ -124,10 +123,9 @@ void airplay_output_packet(void *data, encoder_packet *packet)
 		return;
 	}
 	if (context && context->packets < 3) {
-		blog(LOG_INFO,
-		     "[obs-airplay-cast] output packet %llu: type=%d size=%zu keyframe=%s",
-		     static_cast<unsigned long long>(context->packets), packet->type,
-		     packet->size, packet->keyframe ? "yes" : "no");
+		blog(LOG_INFO, "[obs-airplay-cast] output packet %llu: type=%d size=%zu keyframe=%s",
+		     static_cast<unsigned long long>(context->packets), packet->type, packet->size,
+		     packet->keyframe ? "yes" : "no");
 		context->packets++;
 	}
 	if (g_cast)
@@ -161,8 +159,7 @@ AirPlayCastSettings load_airplay_cast_settings()
 	const char *target_ip = config_get_string(config, "AirPlayCast", kTargetIPKey);
 	if (target_ip && *target_ip)
 		settings.target_ip = target_ip;
-	const int target_port =
-		static_cast<int>(config_get_int(config, "AirPlayCast", kTargetPortKey));
+	const int target_port = static_cast<int>(config_get_int(config, "AirPlayCast", kTargetPortKey));
 	if (target_port > 0 && target_port <= 65535)
 		settings.target_port = static_cast<uint16_t>(target_port);
 	const int fps = static_cast<int>(config_get_int(config, "AirPlayCast", kFPSKey));
@@ -171,6 +168,9 @@ AirPlayCastSettings load_airplay_cast_settings()
 	const int bitrate = static_cast<int>(config_get_int(config, "AirPlayCast", kBitrateKey));
 	if (bitrate >= 4000 && bitrate <= 30000)
 		settings.bitrate_kbps = bitrate;
+	settings.auto_cast_on_obs_start = resolve_auto_cast_on_obs_start(
+		config_has_user_value(config, "AirPlayCast", kAutoCastOnObsStartKey),
+		config_get_bool(config, "AirPlayCast", kAutoCastOnObsStartKey));
 	return settings;
 }
 
@@ -184,6 +184,7 @@ void save_airplay_cast_settings(const AirPlayCastSettings &settings)
 	config_set_int(config, "AirPlayCast", kTargetPortKey, settings.target_port);
 	config_set_int(config, "AirPlayCast", kFPSKey, settings.fps);
 	config_set_int(config, "AirPlayCast", kBitrateKey, settings.bitrate_kbps);
+	config_set_bool(config, "AirPlayCast", kAutoCastOnObsStartKey, settings.auto_cast_on_obs_start);
 	config_save(config);
 }
 
@@ -201,18 +202,24 @@ AirPlayCast::~AirPlayCast()
 
 bool AirPlayCast::Start()
 {
+	return Start(load_airplay_cast_settings());
+}
+
+bool AirPlayCast::Start(const AirPlayCastSettings &settings)
+{
 	const AirPlayCastState current = state_.load();
 	if (current != AirPlayCastState::Stopped)
 		return false;
 	if (start_thread_.joinable())
 		start_thread_.join();
+	if (monitor_thread_.joinable())
+		monitor_thread_.join();
 
 	state_ = AirPlayCastState::Starting;
 	start_time_ = std::chrono::steady_clock::now();
 	first_video_seen_ = false;
 	first_audio_seen_ = false;
-	AirPlayCastSettings settings = load_airplay_cast_settings();
-	start_thread_ = std::thread(&AirPlayCast::StartThread, this, std::move(settings));
+	start_thread_ = std::thread(&AirPlayCast::StartThread, this, settings);
 	return true;
 }
 
@@ -223,8 +230,8 @@ bool AirPlayCast::WarmUp(std::string &error)
 
 void AirPlayCast::StartThread(AirPlayCastSettings settings)
 {
-	blog(LOG_INFO, "[obs-airplay-cast] starting receiver '%s' at %s:%u",
-	     settings.target.c_str(), settings.target_ip.c_str(), settings.target_port);
+	blog(LOG_INFO, "[obs-airplay-cast] starting receiver '%s' at %s:%u", settings.target.c_str(),
+	     settings.target_ip.c_str(), settings.target_port);
 
 	AirPlayBridgeConfig bridge_config;
 	bridge_config.target = settings.target;
@@ -244,10 +251,9 @@ void AirPlayCast::StartThread(AirPlayCastSettings settings)
 		return;
 	}
 	blog(LOG_INFO, "[obs-airplay-cast] timing: AirPlay ready in %lld ms",
-	     static_cast<long long>(
-		     std::chrono::duration_cast<std::chrono::milliseconds>(
-			     std::chrono::steady_clock::now() - setup_started)
-			     .count()));
+	     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+					    std::chrono::steady_clock::now() - setup_started)
+					    .count()));
 
 	const auto output_started = std::chrono::steady_clock::now();
 	if (!StartOutput(info.width, info.height, settings, error)) {
@@ -258,23 +264,61 @@ void AirPlayCast::StartThread(AirPlayCastSettings settings)
 		return;
 	}
 	blog(LOG_INFO, "[obs-airplay-cast] timing: OBS output started in %lld ms",
-	     static_cast<long long>(
-		     std::chrono::duration_cast<std::chrono::milliseconds>(
-			     std::chrono::steady_clock::now() - output_started)
-			     .count()));
+	     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+					    std::chrono::steady_clock::now() - output_started)
+					    .count()));
 
 	state_ = AirPlayCastState::Running;
 	blog(LOG_INFO, "[obs-airplay-cast] streaming to AirPlay receiver '%s' (%dx%d, %d kbps)",
 	     settings.target.c_str(), info.width, info.height, settings.bitrate_kbps);
-	blog(LOG_INFO, "[obs-airplay-cast] timing: click to output ready %lld ms",
-	     elapsed_ms(start_time_));
+	blog(LOG_INFO, "[obs-airplay-cast] timing: click to output ready %lld ms", elapsed_ms(start_time_));
+	{
+		std::lock_guard<std::mutex> lock(monitor_mutex_);
+		monitor_quit_ = false;
+	}
+	monitor_thread_ = std::thread(&AirPlayCast::MonitorSession, this);
+}
+
+void AirPlayCast::MonitorSession()
+{
+	while (true) {
+		std::unique_lock<std::mutex> lock(monitor_mutex_);
+		if (monitor_cv_.wait_for(lock, std::chrono::seconds(1), [this]() { return monitor_quit_; }))
+			return;
+		lock.unlock();
+
+		if (state_.load() != AirPlayCastState::Running)
+			return;
+
+		AirPlaySessionStatus status = AirPlaySessionStatus::Idle;
+		std::string error;
+		const bool transport_ok = bridge_.SessionStatus(status, error);
+		if (state_.load() != AirPlayCastState::Running)
+			return;
+		if (transport_ok && status == AirPlaySessionStatus::Running)
+			continue;
+
+		AirPlayCastState expected = AirPlayCastState::Running;
+		if (!state_.compare_exchange_strong(expected, AirPlayCastState::Stopping))
+			return;
+
+		const std::string reason =
+			!transport_ok ? error
+				      : (error.empty() ? "AirPlay receiver session ended" : error);
+		blog(LOG_WARNING, "[obs-airplay-cast] receiver disconnected: %s", reason.c_str());
+		StoreError("与抖音直播伴侣的连接已断开：" + reason);
+		StopOutput();
+		bridge_.StopSession();
+		state_ = AirPlayCastState::Stopped;
+		monitor_cv_.notify_all();
+		return;
+	}
 }
 
 std::string AirPlayCast::ChooseEncoder() const
 {
-	static const std::array<const char *, 5> preferred = {
-		"obs_nvenc_h264_tex", "obs_nvenc_h264_cuda", "obs_qsv11_v2", "obs_qsv11",
-		"obs_x264"};
+	static const std::array<const char *, 5> preferred = {"obs_nvenc_h264_tex", "obs_nvenc_h264_cuda",
+							      "obs_qsv11_v2", "obs_qsv11", "obs_x264"};
 	for (const char *id : preferred) {
 		if (encoder_exists(id))
 			return id;
@@ -289,8 +333,8 @@ std::string AirPlayCast::ChooseEncoder() const
 	return {};
 }
 
-bool AirPlayCast::StartOutput(int receiver_width, int receiver_height,
-			      const AirPlayCastSettings &settings, std::string &error)
+bool AirPlayCast::StartOutput(int receiver_width, int receiver_height, const AirPlayCastSettings &settings,
+			      std::string &error)
 {
 	obs_video_info video_info = {};
 	if (!obs_get_video_info(&video_info)) {
@@ -321,8 +365,7 @@ bool AirPlayCast::StartOutput(int receiver_width, int receiver_height,
 		obs_data_set_string(encoder_settings, "tune", "hq");
 	}
 
-	video_encoder_ = obs_video_encoder_create(encoder_id.c_str(), "obs-airplay-h264",
-						  encoder_settings, nullptr);
+	video_encoder_ = obs_video_encoder_create(encoder_id.c_str(), "obs-airplay-h264", encoder_settings, nullptr);
 	obs_data_release(encoder_settings);
 	if (!video_encoder_) {
 		error = "could not create H.264 encoder " + encoder_id;
@@ -330,13 +373,13 @@ bool AirPlayCast::StartOutput(int receiver_width, int receiver_height,
 	}
 
 	obs_encoder_set_video(video_encoder_, obs_get_video());
-	obs_encoder_set_scaled_size(video_encoder_, static_cast<uint32_t>(width),
-				    static_cast<uint32_t>(height));
-	const double base_fps =
-		video_info.fps_den ? static_cast<double>(video_info.fps_num) / video_info.fps_den : 0;
+	obs_encoder_set_scaled_size(video_encoder_, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+	const double base_fps = video_info.fps_den ? static_cast<double>(video_info.fps_num) / video_info.fps_den : 0;
 	const int requested_fps = settings.fps;
 	const uint32_t divisor =
-		base_fps > requested_fps ? std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(base_fps / requested_fps))) : 1;
+		base_fps > requested_fps
+			? std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(base_fps / requested_fps)))
+			: 1;
 	obs_encoder_set_frame_rate_divisor(video_encoder_, divisor);
 
 	output_ = obs_output_create("obs_airplay_cast_output", "AirPlay Cast", nullptr, nullptr);
@@ -386,8 +429,7 @@ void AirPlayCast::StopOutput()
 		if (active)
 			obs_output_stop(output_);
 		if (active && stop_event_ && os_event_timedwait(stop_event_, 3000) != 0) {
-			blog(LOG_WARNING,
-			     "[obs-airplay-cast] output deactivate timed out; forcing OBS output stop");
+			blog(LOG_WARNING, "[obs-airplay-cast] output deactivate timed out; forcing OBS output stop");
 			obs_output_force_stop(output_);
 		}
 		if (output_signals_)
@@ -412,12 +454,20 @@ void AirPlayCast::StopOutput()
 void AirPlayCast::Stop()
 {
 	const AirPlayCastState current = state_.load();
-	if (current == AirPlayCastState::Stopped || current == AirPlayCastState::Stopping)
+	if (current == AirPlayCastState::Stopped && !start_thread_.joinable() && !monitor_thread_.joinable())
 		return;
 
-	state_ = AirPlayCastState::Stopping;
+	if (current != AirPlayCastState::Stopping)
+		state_ = AirPlayCastState::Stopping;
+	{
+		std::lock_guard<std::mutex> lock(monitor_mutex_);
+		monitor_quit_ = true;
+	}
+	monitor_cv_.notify_all();
 	if (start_thread_.joinable())
 		start_thread_.join();
+	if (monitor_thread_.joinable())
+		monitor_thread_.join();
 	StopOutput();
 	bridge_.StopSession();
 	state_ = AirPlayCastState::Stopped;
@@ -432,18 +482,16 @@ void AirPlayCast::Shutdown()
 
 void AirPlayCast::HandleEncodedPacket(const encoder_packet *packet)
 {
-	if (!packet || state_.load() != AirPlayCastState::Running ||
-	    packet->type != OBS_ENCODER_VIDEO || !packet->data || packet->size == 0)
+	if (!packet || state_.load() != AirPlayCastState::Running || packet->type != OBS_ENCODER_VIDEO ||
+	    !packet->data || packet->size == 0)
 		return;
 
-	const uint64_t timestamp = packet->sys_dts_usec > 0
-					   ? static_cast<uint64_t>(packet->sys_dts_usec) * 1000ULL
-					   : os_gettime_ns();
+	const uint64_t timestamp = packet->sys_dts_usec > 0 ? static_cast<uint64_t>(packet->sys_dts_usec) * 1000ULL
+							    : os_gettime_ns();
 	if (bridge_.PushVideo(packet->data, packet->size, timestamp)) {
 		bool expected = false;
 		if (first_video_seen_.compare_exchange_strong(expected, true)) {
-			blog(LOG_INFO,
-			     "[obs-airplay-cast] timing: click to first encoded video %lld ms (keyframe=%s)",
+			blog(LOG_INFO, "[obs-airplay-cast] timing: click to first encoded video %lld ms (keyframe=%s)",
 			     elapsed_ms(start_time_), packet->keyframe ? "yes" : "no");
 		}
 		video_bytes_ += packet->size;
@@ -458,8 +506,7 @@ void AirPlayCast::HandleAudioData(const audio_data *audio)
 	if (bridge_.PushAudio(audio->data[0], bytes, audio->timestamp)) {
 		bool expected = false;
 		if (first_audio_seen_.compare_exchange_strong(expected, true))
-			blog(LOG_INFO,
-			     "[obs-airplay-cast] timing: click to first audio callback %lld ms",
+			blog(LOG_INFO, "[obs-airplay-cast] timing: click to first audio callback %lld ms",
 			     elapsed_ms(start_time_));
 	}
 }
@@ -470,8 +517,8 @@ void AirPlayCast::HandleOutputStop()
 		os_event_signal(stop_event_);
 }
 
-bool AirPlayCast::DiscoverDevices(std::vector<AirPlayDeviceInfo> &devices,
-				  const std::string &preferred, std::string &error)
+bool AirPlayCast::DiscoverDevices(std::vector<AirPlayDeviceInfo> &devices, const std::string &preferred,
+				  std::string &error)
 {
 	if (state_.load() != AirPlayCastState::Stopped) {
 		error = "停止投屏后才能重新扫描接收端";

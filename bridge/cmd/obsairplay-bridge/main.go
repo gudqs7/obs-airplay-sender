@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"doubletake/internal/airplay"
@@ -28,6 +29,7 @@ const (
 	ipcStop     = uint16(4)
 	ipcClock    = uint16(5)
 	ipcDiscover = uint16(6)
+	ipcStatus   = uint16(7)
 	ipcResponse = uint16(100)
 )
 
@@ -71,6 +73,12 @@ type discoverResponse struct {
 	OK      bool         `json:"ok"`
 	Message string       `json:"message,omitempty"`
 	Devices []deviceInfo `json:"devices,omitempty"`
+}
+
+type statusResponse struct {
+	OK      bool   `json:"ok"`
+	Session string `json:"session,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 type discoverRequest struct {
@@ -319,8 +327,11 @@ type streamSession struct {
 	cancel     context.CancelFunc
 	video      *videoSource
 	audio      *audioSource
-	done       chan struct{}
+	finished   chan struct{}
 	closeOnce  sync.Once
+	running    atomic.Bool
+	failureMu  sync.Mutex
+	failure    string
 	obsBase    uint64
 	goBase     time.Time
 	haveClock  bool
@@ -395,6 +406,7 @@ func (s *streamSession) pushAudio(obsNS uint64, data []byte) bool {
 
 func (s *streamSession) stop() {
 	s.closeOnce.Do(func() {
+		s.running.Store(false)
 		s.cancel()
 		if s.mirror != nil {
 			_ = s.mirror.Close()
@@ -402,11 +414,42 @@ func (s *streamSession) stop() {
 		if s.client != nil {
 			_ = s.client.Close()
 		}
-		select {
-		case <-s.done:
-		case <-time.After(3 * time.Second):
-		}
 	})
+}
+
+func (s *streamSession) fail(message string) {
+	s.failureMu.Lock()
+	if s.failure == "" {
+		s.failure = message
+	}
+	s.failureMu.Unlock()
+	s.stop()
+}
+
+func (s *streamSession) wait(timeout time.Duration) {
+	if s == nil || s.finished == nil {
+		return
+	}
+	select {
+	case <-s.finished:
+	case <-time.After(timeout):
+	}
+}
+
+func (s *streamSession) status() (string, string) {
+	if s == nil {
+		return "idle", ""
+	}
+	s.failureMu.Lock()
+	failure := s.failure
+	s.failureMu.Unlock()
+	if failure != "" {
+		return "disconnected", failure
+	}
+	if !s.running.Load() {
+		return "stopped", ""
+	}
+	return "running", ""
 }
 
 func startSession(parent context.Context, request startRequest, cache *discoveryCache) (*streamSession, error) {
@@ -485,11 +528,12 @@ func startSession(parent context.Context, request startRequest, cache *discovery
 		cancel:    cancel,
 		video:     video,
 		audio:     audio,
-		done:      make(chan struct{}, 2),
+		finished:  make(chan struct{}),
 		width:     width,
 		height:    height,
 		startedAt: startedAt,
 	}
+	session.running.Store(true)
 
 	var workers sync.WaitGroup
 	workers.Add(2)
@@ -498,7 +542,7 @@ func startSession(parent context.Context, request startRequest, cache *discovery
 		err := mirror.StreamFrames(ctx, airplay.NewExternalVideoCapture(video), 0)
 		if err != nil && ctx.Err() == nil {
 			log.Printf("video stream ended: %v", err)
-			session.stop()
+			session.fail(err.Error())
 		}
 	}()
 	go func() {
@@ -511,12 +555,12 @@ func startSession(parent context.Context, request startRequest, cache *discovery
 		err := mirror.StreamAudio(ctx, capture, mirror.AudioStream())
 		if err != nil && ctx.Err() == nil {
 			log.Printf("audio stream ended: %v", err)
-			session.stop()
+			session.fail(err.Error())
 		}
 	}()
 	go func() {
 		workers.Wait()
-		session.done <- struct{}{}
+		close(session.finished)
 	}()
 
 	log.Printf("airplay session ready: target=%q canvas=%dx%d audioCodec=%d fairplayKeyMode=%q",
@@ -705,6 +749,11 @@ func respondDevices(conn net.Conn, response discoverResponse) error {
 	return writePacket(conn, ipcHeader{Type: ipcResponse}, payload)
 }
 
+func respondStatus(conn net.Conn, response statusResponse) error {
+	payload, _ := json.Marshal(response)
+	return writePacket(conn, ipcHeader{Type: ipcResponse}, payload)
+}
+
 func discoverDevices(ctx context.Context, cache *discoveryCache, preferred string) ([]deviceInfo, error) {
 	startedAt := time.Now()
 	var found []airplay.AirPlayDevice
@@ -748,6 +797,7 @@ func handleConnection(conn net.Conn, cache *discoveryCache) {
 	defer func() {
 		if session != nil {
 			session.stop()
+			session.wait(3 * time.Second)
 		}
 	}()
 
@@ -782,6 +832,13 @@ func handleConnection(conn net.Conn, cache *discoveryCache) {
 				continue
 			}
 			_ = respondDevices(conn, discoverResponse{OK: true, Devices: devices})
+		case ipcStatus:
+			if session == nil {
+				_ = respondStatus(conn, statusResponse{OK: true, Session: "idle"})
+				continue
+			}
+			state, message := session.status()
+			_ = respondStatus(conn, statusResponse{OK: true, Session: state, Message: message})
 		case ipcStart:
 			if session != nil {
 				_ = respond(conn, startResponse{OK: false, Message: "an AirPlay session is already active"})
@@ -820,6 +877,7 @@ func handleConnection(conn net.Conn, cache *discoveryCache) {
 		case ipcStop:
 			if session != nil {
 				session.stop()
+				session.wait(3 * time.Second)
 				session = nil
 			}
 			_ = respond(conn, startResponse{OK: true})

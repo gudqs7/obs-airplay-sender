@@ -46,7 +46,14 @@ OBS DLL 不解码或重新采样 AirPlay 音频。它把 OBS 主混音转换成
 5. 把编码包和 PCM 分别交给 `AirPlayBridge`。
 
 `src/plugin-main.cpp` 提供 `工具 → AirPlay 投屏...` 菜单和同一个窗口内的扫描、开始、
-停止操作。接收端列表优先显示抖音设备。
+停止操作。接收端列表优先显示抖音设备。启用自动投屏后，插件在 OBS 完成加载时启动
+单实例监控；未找到抖音接收端或会话断开时每秒轮询 bridge 的热 mDNS 缓存，找到后切回
+主线程保存目标并启动投屏。投屏运行期间监控保持待命但不重复扫描。手动停止、OBS 退出
+和插件卸载都会先解除自动监控并等待任务结束。
+
+`AirPlayCast` 在运行期间每秒通过兼容的 IPC 状态查询检查 bridge 会话。bridge 监测
+AirPlay 视频数据连接；接收端关闭或崩溃时返回 `disconnected`，插件随即停止 OBS 输出
+和 bridge 会话，自动监控随后从 `Stopped` 状态重新扫描。
 
 ## Bridge 侧
 

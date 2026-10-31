@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -12,6 +13,7 @@
 #include <util/threading.h>
 
 #include "airplay-bridge.hpp"
+#include "airplay-cast-state.hpp"
 
 struct AirPlayCastSettings {
 	std::string target = "抖音直播伴侣";
@@ -20,17 +22,11 @@ struct AirPlayCastSettings {
 	std::string password;
 	int fps = 60;
 	int bitrate_kbps = 12000;
+	bool auto_cast_on_obs_start = true;
 };
 
 AirPlayCastSettings load_airplay_cast_settings();
 void save_airplay_cast_settings(const AirPlayCastSettings &settings);
-
-enum class AirPlayCastState {
-	Stopped,
-	Starting,
-	Running,
-	Stopping,
-};
 
 class AirPlayCast {
 public:
@@ -45,8 +41,8 @@ public:
 	AirPlayCastState State() const { return state_.load(); }
 	bool Running() const { return state_.load() == AirPlayCastState::Running; }
 	uint64_t TotalBytes() const { return video_bytes_.load(); }
-	bool DiscoverDevices(std::vector<AirPlayDeviceInfo> &devices, const std::string &preferred,
-			     std::string &error);
+	bool Start(const AirPlayCastSettings &settings);
+	bool DiscoverDevices(std::vector<AirPlayDeviceInfo> &devices, const std::string &preferred, std::string &error);
 	bool TakeError(std::string &message);
 
 	void HandleEncodedPacket(const encoder_packet *packet);
@@ -55,6 +51,7 @@ public:
 
 private:
 	void StartThread(AirPlayCastSettings settings);
+	void MonitorSession();
 	bool StartOutput(int receiver_width, int receiver_height, const AirPlayCastSettings &settings,
 			 std::string &error);
 	void StopOutput();
@@ -64,6 +61,10 @@ private:
 	AirPlayBridge bridge_;
 	std::atomic<AirPlayCastState> state_{AirPlayCastState::Stopped};
 	std::thread start_thread_;
+	std::thread monitor_thread_;
+	std::mutex monitor_mutex_;
+	std::condition_variable monitor_cv_;
+	bool monitor_quit_ = false;
 
 	obs_encoder_t *video_encoder_ = nullptr;
 	obs_output_t *output_ = nullptr;

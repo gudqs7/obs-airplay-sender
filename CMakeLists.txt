@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.28...3.30)
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCOPE)
 
 project(${_name} VERSION ${_version})
+include(CTest)
 
 option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" ON)
 option(ENABLE_QT "Use Qt functionality" ON)
@@ -113,8 +114,12 @@ target_sources(
     src/plugin-main.cpp
     src/airplay-cast.cpp
     src/airplay-cast.hpp
+    src/airplay-cast-state.hpp
+    src/airplay-auto-cast.hpp
     src/airplay-bridge.cpp
     src/airplay-bridge.hpp
+    src/airplay-receiver.hpp
+    src/airplay-settings.hpp
 )
 
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -146,3 +151,14 @@ install(
   DIRECTORY licenses/
   DESTINATION "${CMAKE_PROJECT_NAME}/licenses"
 )
+
+if(BUILD_TESTING)
+  add_executable(obs-airplay-cast-tests tests/airplay-receiver-test.cpp)
+  target_include_directories(obs-airplay-cast-tests PRIVATE src)
+  target_compile_features(obs-airplay-cast-tests PRIVATE cxx_std_17)
+  target_compile_definitions(
+    obs-airplay-cast-tests
+    PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
+  )
+  add_test(NAME obs-airplay-cast-receiver COMMAND obs-airplay-cast-tests)
+endif()

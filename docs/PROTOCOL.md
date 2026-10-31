@@ -134,6 +134,22 @@ call Audio_Process_Multi ... size=1920
 Windows 音频会话探针只能检查会话、音量和端点，不能替代接收端验收。一次成功会话中，
 该探针仍可能在默认 HDMI 端点报告 `peak=0`。
 
+## Bridge IPC 会话状态
+
+原有 24 字节小端 IPC 头、视频/音频/时钟/停止/发现报文保持不变。0.1.3 新增类型 `7`
+的状态查询：请求无 payload，bridge 使用原有响应类型 `100` 返回 JSON：
+
+```json
+{"ok":true,"session":"running"}
+{"ok":true,"session":"disconnected","message":"video data channel closed: EOF"}
+{"ok":true,"session":"stopped"}
+{"ok":true,"session":"idle"}
+```
+
+旧版 OBS 插件不会发送类型 `7`，因此不会影响现有 bridge。新版插件在投屏运行期间每秒
+查询一次；传输失败或返回 `disconnected` 时先停止 OBS 输出，再发送原有停止报文并回到
+`Stopped`。自动连接启用时，监控会重新开始发现接收端。
+
 ## 禁止回退
 
 - 不要用 ALAC `spf=352` 解决抖音无声。

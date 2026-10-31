@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"testing"
 	"time"
 
@@ -73,5 +77,90 @@ func TestDiscoveryCacheEndpointLookupAndInvalidate(t *testing.T) {
 	cache.removeEndpoint("192.168.3.52", 11292)
 	if _, ok := cache.lookupEndpoint("192.168.3.52", 11292, "抖音直播伴侣"); ok {
 		t.Fatal("invalidated endpoint is still present")
+	}
+}
+
+func TestStreamSessionReportsDisconnectedState(t *testing.T) {
+	_, cancel := context.WithCancel(context.Background())
+	session := &streamSession{
+		cancel:   cancel,
+		finished: make(chan struct{}),
+	}
+	session.running.Store(true)
+
+	state, message := session.status()
+	if state != "running" || message != "" {
+		t.Fatalf("unexpected running state: state=%q message=%q", state, message)
+	}
+
+	session.fail(errors.New("video data channel closed").Error())
+	state, message = session.status()
+	if state != "disconnected" {
+		t.Fatalf("expected disconnected state, got state=%q message=%q", state, message)
+	}
+	if message != "video data channel closed" {
+		t.Fatalf("unexpected disconnect message: %q", message)
+	}
+
+	close(session.finished)
+	session.wait(10 * time.Millisecond)
+}
+
+func TestStreamSessionStopReportsStoppedState(t *testing.T) {
+	_, cancel := context.WithCancel(context.Background())
+	session := &streamSession{
+		cancel:   cancel,
+		finished: make(chan struct{}),
+	}
+	session.running.Store(true)
+	session.stop()
+
+	state, message := session.status()
+	if state != "stopped" || message != "" {
+		t.Fatalf("unexpected stopped state: state=%q message=%q", state, message)
+	}
+
+	close(session.finished)
+	session.wait(10 * time.Millisecond)
+}
+
+func TestHandleConnectionReportsIdleStatus(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close()
+	_ = client.SetDeadline(time.Now().Add(2 * time.Second))
+
+	done := make(chan struct{})
+	go func() {
+		handleConnection(server, nil)
+		close(done)
+	}()
+
+	if err := writePacket(client, ipcHeader{Type: ipcStatus}, nil); err != nil {
+		t.Fatalf("write status request: %v", err)
+	}
+	header, err := readHeader(client)
+	if err != nil {
+		t.Fatalf("read status response header: %v", err)
+	}
+	if header.Type != ipcResponse {
+		t.Fatalf("unexpected response type: %d", header.Type)
+	}
+	payload := make([]byte, header.Length)
+	if _, err := io.ReadFull(client, payload); err != nil {
+		t.Fatalf("read status response: %v", err)
+	}
+	var response statusResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		t.Fatalf("decode status response: %v", err)
+	}
+	if !response.OK || response.Session != "idle" {
+		t.Fatalf("unexpected status response: %+v", response)
+	}
+
+	_ = client.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("bridge handler did not exit after client disconnect")
 	}
 }

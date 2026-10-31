@@ -34,6 +34,13 @@ struct AirPlayDeviceInfo {
 	uint16_t port = 0;
 };
 
+enum class AirPlaySessionStatus {
+	Idle,
+	Running,
+	Disconnected,
+	Stopped,
+};
+
 class AirPlayBridge {
 public:
 	explicit AirPlayBridge(std::wstring helper_path);
@@ -49,6 +56,7 @@ public:
 	bool SyncClock(uint64_t obs_time_ns);
 	bool PushVideo(const uint8_t *data, size_t size, uint64_t obs_time_ns);
 	bool PushAudio(const uint8_t *data, size_t size, uint64_t obs_time_ns);
+	bool SessionStatus(AirPlaySessionStatus &status, std::string &error);
 	bool Connected() const;
 
 private:
@@ -64,7 +72,7 @@ private:
 	bool Enqueue(uint16_t type, uint64_t pts, const uint8_t *data, size_t size, bool audio);
 	void WriterLoop();
 	bool SendPacket(uint16_t type, uint64_t pts, const uint8_t *data, size_t size);
-	bool ReceiveResponse(std::string &payload, std::string &error);
+	bool ReceiveResponse(std::string &payload, std::string &error, int timeout_ms = 30000);
 	bool SendDiscover(std::vector<AirPlayDeviceInfo> &devices, const std::string &preferred,
 			  std::string &error);
 	bool ReadReady(uint16_t &port, std::string &error);

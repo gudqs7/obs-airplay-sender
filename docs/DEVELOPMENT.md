@@ -39,6 +39,14 @@ $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\Co
 - `obs-airplay-cast`：OBS 插件 DLL。
 - `obs-airplay-bridge`：Go bridge。
 - `obs-airplay-aac-eld`：libxaac AAC-ELD helper。
+- `obs-airplay-cast-tests`：接收端选择、自动连接默认值和断线后重连策略测试。
+
+接收端选择测试可以直接运行：
+
+```powershell
+& $cmake --build .\build_x64 --config RelWithDebInfo --target obs-airplay-cast-tests --parallel
+ctest --test-dir .\build_x64 -C RelWithDebInfo --output-on-failure
+```
 
 ## Go bridge 编译检查
 
@@ -114,6 +122,12 @@ $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\Co
 2. 安装后 OBS 可以加载 `obs-airplay-cast.dll` 并显示 AirPlay 投屏菜单。
 3. 再次运行安装包可以完成覆盖升级。
 4. Windows 应用列表中的卸载入口可以移除插件。
+5. 交互安装时确认步骤文字、百分比和进度条持续更新，窗口可拖动并重绘。
+6. 运行 `installer\Test-Installer.ps1`，确认静默安装进度从 0 到 100 且不倒退。
+7. 运行 `installer\Test-InstallerUi.ps1`，确认进度条在点击安装前隐藏、点击后可见，
+   且安装期间鼠标保持普通图标；98% 启动 OBS 阶段窗口仍可响应，100% 不提前显示。
+8. 运行 `installer\Test-InstallerElevation.ps1`，确认提权重启后的子安装窗口恢复前台焦点；
+   如需验证真实 OBS 启动，追加 `-UseInstalledObs` 运行 UI 测试。
 
 ## 合成输入探针
 
@@ -156,8 +170,12 @@ bridge 日志位于 `%TEMP%\obs-airplay-cast-bridge.log`，每次 bridge 启动�
 4. 检查三个产物版本一致，且 AAC helper 与 bridge 被复制到同一目录。
 5. 确认安装结果包含 `LICENSE`、`THIRD_PARTY_NOTICES.md`、
    `licenses\` 下的 doubletake、GPLv3 和 libxaac 许可证文本。
-6. 审计提交内容，排除日志、用户目录、凭据、PDB、EXE、缓存和 `.deps`。
-7. 若创建二进制发布包，核对 DLL、bridge、helper 哈希和 release 包内文件。
+6. 启用自动投屏但没有抖音接收端时，确认 OBS 日志每秒出现一次 discovery，且退出
+   OBS 后没有残留 bridge、helper 或投屏连接。
+7. 投屏运行中关闭或结束抖音直播伴侣，确认 OBS 日志出现 receiver disconnected，
+   插件回到等待状态并在接收端恢复后重新连接；手动停止后不得再次连接。
+8. 审计提交内容，排除日志、用户目录、凭据、PDB、EXE、缓存和 `.deps`。
+9. 若创建二进制发布包，核对 DLL、bridge、helper 哈希和 release 包内文件。
 
 ## 许可证发布检查
 
