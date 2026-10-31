@@ -1,0 +1,80 @@
+# Local third-party source checkouts
+/third_party/
+
+# CMake and dependency build products
+/.deps/
+/build/
+/build_*/
+/out/
+/cmake/.CMakeBuildNumber
+/.ccache/
+
+# Release and package outputs
+/release/
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tar.xz
+*.deb
+*.ddeb
+*.pkg
+*.dmg
+*.msi
+*.nupkg
+
+# Compiled binaries and debug artifacts
+*.exe
+*.dll
+*.pdb
+*.lib
+*.obj
+*.o
+*.a
+*.ilk
+*.exp
+*.test
+*.dSYM/
+
+# Logs, crash dumps, and temporary output
+*.log
+*.tmp
+*.temp
+*.pid
+*.dmp
+*.mdmp
+*.etl
+*.trace
+*.h264
+*.264
+*.aac
+*.wav
+
+# Test and coverage output
+/coverage/
+/TestResults/
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+
+# Local configuration and credentials
+.env
+.env.*
+*.local
+airplay-credentials.json
+credentials.json
+
+# Editors and operating systems
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/

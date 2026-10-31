@@ -1,0 +1,927 @@
+diff --git a/internal/airplay/aac_eld_fdk.go b/internal/airplay/aac_eld_fdk.go
+index f1081b7..499b5ab 100644
+--- a/internal/airplay/aac_eld_fdk.go
++++ b/internal/airplay/aac_eld_fdk.go
+@@ -58,7 +58,9 @@ import (
+ 	"unsafe"
+ )
+ 
+-const aacELDEncoderAvailable = true
++func aacELDEncoderAvailable() bool {
++	return true
++}
+ 
+ type eldEncoder struct {
+ 	enc      C.HANDLE_AACENCODER
+diff --git a/internal/airplay/aac_eld_fdk_test.go b/internal/airplay/aac_eld_fdk_test.go
+index 7bbe133..bfa3573 100644
+--- a/internal/airplay/aac_eld_fdk_test.go
++++ b/internal/airplay/aac_eld_fdk_test.go
+@@ -10,7 +10,7 @@ import (
+ )
+ 
+ func TestFDKAACELDEncodesRawFrame(t *testing.T) {
+-	if !aacELDEncoderAvailable {
++	if !aacELDEncoderAvailable() {
+ 		t.Fatal("FDK build did not advertise its AAC-ELD encoder")
+ 	}
+ 	encoder, err := newELDEncoder()
+diff --git a/internal/airplay/aac_eld_stub.go b/internal/airplay/aac_eld_stub.go
+index 80938d7..0f7be4e 100644
+--- a/internal/airplay/aac_eld_stub.go
++++ b/internal/airplay/aac_eld_stub.go
+@@ -2,21 +2,149 @@
+ 
+ package airplay
+ 
+-import "fmt"
++import (
++	"bufio"
++	"encoding/binary"
++	"fmt"
++	"io"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"sync"
++	"time"
++)
+ 
+-const aacELDEncoderAvailable = false
++const (
++	eldEncoderFilename    = "obs-airplay-aac-eld.exe"
++	eldPCMFrameBytes      = 480 * 2 * 2
++	maxELDEncodedFrameLen = 8192
++)
+ 
+-// eldEncoder is present in every build so codec negotiation remains portable.
+-// The actual encoder is deliberately opt-in: libfdk-aac is not available on
+-// every supported distribution and doubletake's release binaries are static.
+-type eldEncoder struct{}
++func aacELDEncoderAvailable() bool {
++	_, err := findELDEncoder()
++	return err == nil
++}
++
++func findELDEncoder() (string, error) {
++	var candidates []string
++	if configured := strings.TrimSpace(os.Getenv("OBS_AIRPLAY_ELD_ENCODER")); configured != "" {
++		candidates = append(candidates, configured)
++	}
++	if executable, err := os.Executable(); err == nil {
++		candidates = append(candidates, filepath.Join(filepath.Dir(executable), eldEncoderFilename))
++	}
++	if workingDirectory, err := os.Getwd(); err == nil {
++		candidates = append(candidates, filepath.Join(workingDirectory, eldEncoderFilename))
++	}
++
++	seen := make(map[string]bool, len(candidates))
++	for _, candidate := range candidates {
++		absolute, err := filepath.Abs(candidate)
++		if err != nil || seen[absolute] {
++			continue
++		}
++		seen[absolute] = true
++		info, err := os.Stat(absolute)
++		if err == nil && !info.IsDir() {
++			return absolute, nil
++		}
++	}
++	return "", fmt.Errorf("%w: %s was not found", ErrAACELDUnavailable, eldEncoderFilename)
++}
++
++type eldEncoder struct {
++	cmd       *exec.Cmd
++	stdin     io.WriteCloser
++	stdout    *bufio.Reader
++	closeOnce sync.Once
++}
+ 
+ func newELDEncoder() (*eldEncoder, error) {
+-	return nil, fmt.Errorf("%w (install libfdk-aac development files and build with -tags fdk_aac)", ErrAACELDUnavailable)
++	path, err := findELDEncoder()
++	if err != nil {
++		return nil, err
++	}
++	cmd := exec.Command(path)
++	stdin, err := cmd.StdinPipe()
++	if err != nil {
++		return nil, fmt.Errorf("open AAC-ELD encoder input: %w", err)
++	}
++	stdout, err := cmd.StdoutPipe()
++	if err != nil {
++		_ = stdin.Close()
++		return nil, fmt.Errorf("open AAC-ELD encoder output: %w", err)
++	}
++	cmd.Stderr = os.Stderr
++	if err := cmd.Start(); err != nil {
++		_ = stdin.Close()
++		return nil, fmt.Errorf("start AAC-ELD encoder %s: %w", path, err)
++	}
++
++	reader := bufio.NewReader(stdout)
++	ready, err := reader.ReadString('\n')
++	if err != nil {
++		_ = stdin.Close()
++		_ = cmd.Process.Kill()
++		_ = cmd.Wait()
++		return nil, fmt.Errorf("read AAC-ELD encoder startup: %w", err)
++	}
++	if strings.TrimSpace(ready) != "READY 480" {
++		_ = stdin.Close()
++		_ = cmd.Process.Kill()
++		_ = cmd.Wait()
++		return nil, fmt.Errorf("unexpected AAC-ELD encoder startup: %q", strings.TrimSpace(ready))
++	}
++	return &eldEncoder{cmd: cmd, stdin: stdin, stdout: reader}, nil
+ }
+ 
+-func (*eldEncoder) Encode([]byte, []byte) (int, error) {
+-	return 0, ErrAACELDUnavailable
++func (e *eldEncoder) Encode(pcm, out []byte) (int, error) {
++	if e == nil || e.cmd == nil {
++		return 0, ErrAACELDUnavailable
++	}
++	if len(pcm) != eldPCMFrameBytes {
++		return 0, fmt.Errorf("AAC-ELD PCM frame is %d bytes, want %d", len(pcm), eldPCMFrameBytes)
++	}
++	if len(out) == 0 {
++		return 0, fmt.Errorf("AAC-ELD output buffer is empty")
++	}
++	if _, err := e.stdin.Write(pcm); err != nil {
++		return 0, fmt.Errorf("write AAC-ELD PCM: %w", err)
++	}
++
++	var header [4]byte
++	if _, err := io.ReadFull(e.stdout, header[:]); err != nil {
++		return 0, fmt.Errorf("read AAC-ELD frame length: %w", err)
++	}
++	length := int(binary.LittleEndian.Uint32(header[:]))
++	if length <= 0 || length > maxELDEncodedFrameLen {
++		return 0, fmt.Errorf("invalid AAC-ELD frame length %d", length)
++	}
++	if length > len(out) {
++		return 0, fmt.Errorf("AAC-ELD output buffer is %d bytes, frame is %d", len(out), length)
++	}
++	if _, err := io.ReadFull(e.stdout, out[:length]); err != nil {
++		return 0, fmt.Errorf("read AAC-ELD frame: %w", err)
++	}
++	return length, nil
+ }
+ 
+-func (*eldEncoder) Close() {}
++func (e *eldEncoder) Close() {
++	if e == nil || e.cmd == nil {
++		return
++	}
++	e.closeOnce.Do(func() {
++		_ = e.stdin.Close()
++		done := make(chan struct{})
++		go func() {
++			_ = e.cmd.Wait()
++			close(done)
++		}()
++		select {
++		case <-done:
++		case <-time.After(2 * time.Second):
++			_ = e.cmd.Process.Kill()
++			<-done
++		}
++	})
++}
+diff --git a/internal/airplay/aac_eld_stub_test.go b/internal/airplay/aac_eld_stub_test.go
+index 8685cbd..edefd26 100644
+--- a/internal/airplay/aac_eld_stub_test.go
++++ b/internal/airplay/aac_eld_stub_test.go
+@@ -8,7 +8,7 @@ import (
+ )
+ 
+ func TestAACELDStubReportsUnavailable(t *testing.T) {
+-	if aacELDEncoderAvailable {
++	if aacELDEncoderAvailable() {
+ 		t.Fatal("stub build advertised an AAC-ELD encoder")
+ 	}
+ 	if _, err := newELDEncoder(); !errors.Is(err, ErrAACELDUnavailable) {
+diff --git a/internal/airplay/audio.go b/internal/airplay/audio.go
+index ba4b175..293c764 100644
+--- a/internal/airplay/audio.go
++++ b/internal/airplay/audio.go
+@@ -78,7 +78,9 @@ func newAudioChaCha64AEAD(key []byte) (cipher.AEAD, error) {
+ }
+ 
+ func useAudioRedundancy(codec AudioCodec) bool {
+-	return codec == AudioCodecALAC || codec == AudioCodecAACELD
++	// ALAC screen frames are sent once with consecutive sequence numbers.
++	// AAC-ELD is the format that real senders repeat three times per frame.
++	return codec == AudioCodecAACELD
+ }
+ 
+ func defaultAudioChaChaNonceMode() audioChaChaNonceMode {
+@@ -392,7 +394,11 @@ func (ac *AudioCapture) readFramePosition(buf []byte) (int, audioPCMFramePositio
+ 		ac.eldMu.Lock()
+ 		defer ac.eldMu.Unlock()
+ 		if ac.eld == nil {
+-			return 0, audioPCMFramePosition{}, io.EOF
++			var err error
++			ac.eld, err = newELDEncoder()
++			if err != nil {
++				return 0, audioPCMFramePosition{}, err
++			}
+ 		}
+ 		n, err := ac.eld.Encode(pcm, buf)
+ 		return n, position, err
+@@ -527,13 +533,15 @@ func (ac *AudioCapture) Stop() {
+ 	if ac.gstCmd != nil && ac.gstCmd.Process != nil {
+ 		ac.gstCmd.Process.Kill()
+ 	}
+-	select {
+-	case <-ac.waitCh:
+-	case <-time.After(2 * time.Second):
+-		if ac.gstCmd != nil && ac.gstCmd.Process != nil {
+-			ac.gstCmd.Process.Kill()
++	if ac.waitCh != nil {
++		select {
++		case <-ac.waitCh:
++		case <-time.After(2 * time.Second):
++			if ac.gstCmd != nil && ac.gstCmd.Process != nil {
++				ac.gstCmd.Process.Kill()
++			}
++			<-ac.waitCh
+ 		}
+-		<-ac.waitCh
+ 	}
+ 	ac.eldMu.Lock()
+ 	if ac.eld != nil {
+@@ -1234,8 +1242,9 @@ func ptpNanoseconds(timestamp uint64) uint64 {
+ }
+ 
+ // audioClockAt converts a source PTS through the same session clock used by
+-// video. The NTP fallback keeps the monotonic component of the source time and
+-// adds the protocol's 1900 epoch to the sender's boot-relative clock.
++// video. Legacy audio TimeAnnounce uses boot-relative Q32.32 time without the
++// NTP 1900 epoch; UxPlay and real senders add the fixed epoch only while
++// converting timing-service packets.
+ func (s *MirrorSession) audioClockAt(local time.Time) (timestamp, timelineID uint64) {
+ 	if local.IsZero() {
+ 		return s.audioClockNow()
+@@ -1246,7 +1255,7 @@ func (s *MirrorSession) audioClockAt(local time.Time) (timestamp, timelineID uin
+ 		}
+ 	}
+ 	if presentation, ok := addDurationToBootTime(local.Sub(time.Now())); ok {
+-		return compactTimestamp(presentation) + (uint64(secondsFrom1900To1970) << 32), 0
++		return compactTimestamp(presentation), 0
+ 	}
+ 	return s.audioClockNow()
+ }
+diff --git a/internal/airplay/audio_test.go b/internal/airplay/audio_test.go
+index c16e76c..0d45fd6 100644
+--- a/internal/airplay/audio_test.go
++++ b/internal/airplay/audio_test.go
+@@ -18,8 +18,8 @@ import (
+ )
+ 
+ func TestUseAudioRedundancyDefaults(t *testing.T) {
+-	if !useAudioRedundancy(AudioCodecALAC) {
+-		t.Fatal("expected ALAC screen sessions to use recent-packet redundancy")
++	if useAudioRedundancy(AudioCodecALAC) {
++		t.Fatal("ALAC screen frames must be sent once with consecutive sequence numbers")
+ 	}
+ 	if !useAudioRedundancy(AudioCodecAACELD) {
+ 		t.Fatal("expected AAC-ELD screen sessions to use recent-packet redundancy")
+@@ -76,35 +76,22 @@ func TestComposeAudioREDPayload(t *testing.T) {
+ 	}
+ }
+ 
+-func TestStreamAudioUsesNegotiatedRecentFrameRedundancy(t *testing.T) {
++func TestStreamAudioSendsALACFramesOnce(t *testing.T) {
+ 	for _, security := range []string{"plaintext", "AES", "ChaCha"} {
+ 		t.Run(security, func(t *testing.T) {
+ 			stream, packets := streamAudioPacketsForTest(t, security, nil, 12)
+ 			var wantSequences []uint16
+ 			for seq := uint16(1); seq <= 12; seq++ {
+-				first := uint16(1)
+-				if seq > 2 {
+-					first = seq - 2
+-				}
+-				for redundant := first; redundant <= seq; redundant++ {
+-					wantSequences = append(wantSequences, redundant)
+-				}
++				wantSequences = append(wantSequences, seq)
+ 			}
+ 			assertAudioPacketSequences(t, packets, wantSequences)
+ 
+-			// Repeated packets and requested retransmissions must retain the exact
+-			// encoded/encrypted datagram, including its original sample position.
+ 			originals := make(map[uint16][]byte)
+ 			for _, packet := range packets {
+ 				seq := binary.BigEndian.Uint16(packet[2:4])
+-				if original := originals[seq]; original != nil && !bytes.Equal(packet, original) {
+-					t.Fatalf("redundant sequence %d differs from its original datagram", seq)
+-				}
+-				if originals[seq] == nil {
+-					plain := decodeAudioPacketPayloadForTest(t, stream, security, packet)
+-					if len(plain) == 0 || len(plain) >= 1416 {
+-						t.Fatalf("legacy sequence %d ALAC length = %d, want a compressed frame", seq, len(plain))
+-					}
++				plain := decodeAudioPacketPayloadForTest(t, stream, security, packet)
++				if len(plain) == 0 || len(plain) >= 1416 {
++					t.Fatalf("sequence %d ALAC length = %d, want a compressed frame", seq, len(plain))
+ 				}
+ 				originals[seq] = packet
+ 				if !bytes.Equal(stream.audioPacketForRetransmit(seq), packet) {
+@@ -125,100 +112,44 @@ func TestStreamAudioUsesNegotiatedRecentFrameRedundancy(t *testing.T) {
+ func TestEncryptedAudioRedundancyRecoversTwoLostBursts(t *testing.T) {
+ 	const frames = 12
+ 	stream, packets := streamAudioPacketsForTest(t, "ChaCha", nil, frames)
+-	// Lose both startup bursts: [1] and [1,2]. The next burst must recover
+-	// both frames, without a retransmission round trip or a new nonce.
+-	if len(packets) < 6 {
+-		t.Fatalf("only %d packets sent", len(packets))
++	if len(packets) != frames {
++		t.Fatalf("ALAC datagrams = %d, want %d", len(packets), frames)
+ 	}
+-	recovered := make(map[uint16][]byte)
+-	for _, packet := range packets[3:] {
++	for _, packet := range packets {
+ 		seq := binary.BigEndian.Uint16(packet[2:4])
+ 		tail := packet[len(packet)-8:]
+ 		if got := binary.LittleEndian.Uint64(tail); got != uint64(seq-1) {
+-			t.Fatalf("sequence %d nonce = %d, want original nonce %d", seq, got, seq-1)
++			t.Fatalf("sequence %d nonce = %d, want %d", seq, got, seq-1)
+ 		}
+-		plain, err := stream.chachaCipher.Open(nil, tail, packet[12:len(packet)-8], packet[4:12])
+-		if err != nil {
++		if _, err := stream.chachaCipher.Open(nil, tail, packet[12:len(packet)-8], packet[4:12]); err != nil {
+ 			t.Fatalf("authenticate recovered sequence %d: %v", seq, err)
+ 		}
+-		if previous := recovered[seq]; previous != nil && !bytes.Equal(previous, plain) {
+-			t.Fatalf("sequence %d changed its decoded payload", seq)
+-		}
+-		recovered[seq] = plain
+-	}
+-	for seq := uint16(1); seq <= frames; seq++ {
+-		if recovered[seq] == nil {
+-			t.Fatalf("sequence %d was not recovered after two lost bursts", seq)
+-		}
+ 	}
+ 	if stream.chachaNonce != frames {
+ 		t.Fatalf("nonce counter = %d, want one increment per source frame (%d)", stream.chachaNonce, frames)
+ 	}
+ }
+ 
+-func TestStreamAudioUsesRFC2198ForAdvertisedReceiver(t *testing.T) {
++func TestStreamAudioDoesNotApplyRFC2198ToALAC(t *testing.T) {
+ 	const frames = 6
+ 	for _, security := range []string{"plaintext", "AES", "ChaCha"} {
+ 		t.Run(security, func(t *testing.T) {
+ 			stream, packets := streamAudioPacketsForTest(t, security, nil, frames, true)
+ 			if len(packets) != frames {
+-				t.Fatalf("RFC 2198 datagrams = %d, want %d", len(packets), frames)
++				t.Fatalf("ALAC datagrams = %d, want %d", len(packets), frames)
+ 			}
+-			previousPrimary := make([][]byte, 0, audioRedundancyCount)
+ 			for index, packet := range packets {
+ 				seq := uint16(index + 1)
+-				if packet[1] != audioREDPayloadType || binary.BigEndian.Uint16(packet[2:4]) != seq {
+-					t.Fatalf("packet %d header = %02x/%d, want PT=%d seq=%d", index, packet[1], binary.BigEndian.Uint16(packet[2:4]), audioREDPayloadType, seq)
+-				}
+-				if len(packet) > maximumAudioRTPDatagramBytes {
+-					t.Fatalf("packet %d length = %d, maximum %d", index, len(packet), maximumAudioRTPDatagramBytes)
++				if packet[1] != audioDataPayloadType || binary.BigEndian.Uint16(packet[2:4]) != seq {
++					t.Fatalf("packet %d header = %02x/%d, want PT=%d seq=%d", index, packet[1], binary.BigEndian.Uint16(packet[2:4]), audioDataPayloadType, seq)
+ 				}
+ 				plain := decodeAudioPacketPayloadForTest(t, stream, security, packet)
+-				redundant, primary := splitAudioREDPayloadForTest(t, plain)
+-				if len(primary) == 0 || len(primary) > 1023 {
+-					t.Fatalf("packet %d primary ALAC length = %d, want 1..1023", index, len(primary))
+-				}
+-				wantRedundant := 0
+-				used := 1 + len(primary)
+-				for historyIndex := len(previousPrimary) - 1; historyIndex >= 0 && wantRedundant < audioRedundancyCount; historyIndex-- {
+-					block := previousPrimary[historyIndex]
+-					if len(block) > 0x3ff || used+4+len(block) > stream.maximumPlainAudioPayloadBytes() {
+-						break
+-					}
+-					wantRedundant++
+-					used += 4 + len(block)
+-				}
+-				if len(redundant) != wantRedundant {
+-					t.Fatalf("packet %d carries %d redundant frames, want %d", index, len(redundant), wantRedundant)
+-				}
+-				wantHistory := previousPrimary[len(previousPrimary)-wantRedundant:]
+-				for historyIndex := range wantHistory {
+-					if !bytes.Equal(redundant[historyIndex], wantHistory[historyIndex]) {
+-						t.Fatalf("packet %d redundant block %d differs from prior primary", index, historyIndex)
+-					}
+-				}
+-				retransmit := stream.audioPacketForRetransmit(seq)
+-				if len(retransmit) < 12 || retransmit[1] != audioDataPayloadType {
+-					t.Fatalf("sequence %d retransmit packet is not PT96: %x", seq, retransmit[:min(len(retransmit), 12)])
+-				}
+-				if got := decodeAudioPacketPayloadForTest(t, stream, security, retransmit); !bytes.Equal(got, primary) {
+-					t.Fatalf("sequence %d retransmit primary differs from RED primary", seq)
+-				}
+-				if len(previousPrimary) == audioRedundancyCount {
+-					copy(previousPrimary, previousPrimary[1:])
+-					previousPrimary = previousPrimary[:audioRedundancyCount-1]
+-				}
+-				previousPrimary = append(previousPrimary, append([]byte(nil), primary...))
+-				if security == "ChaCha" {
+-					redNonce := binary.LittleEndian.Uint64(packet[len(packet)-audioChaChaNonceSize:])
+-					primaryNonce := binary.LittleEndian.Uint64(retransmit[len(retransmit)-audioChaChaNonceSize:])
+-					if redNonce != uint64(index*2) || primaryNonce != uint64(index*2+1) {
+-						t.Fatalf("sequence %d RED/primary nonces = %d/%d, want %d/%d", seq, redNonce, primaryNonce, index*2, index*2+1)
+-					}
++				if len(plain) == 0 || len(plain) >= 1416 {
++					t.Fatalf("packet %d ALAC length = %d, want a compressed frame", index, len(plain))
+ 				}
+ 			}
+-			if security == "ChaCha" && stream.chachaNonce != frames*2 {
+-				t.Fatalf("nonce counter = %d, want %d", stream.chachaNonce, frames*2)
++			if security == "ChaCha" && stream.chachaNonce != frames {
++				t.Fatalf("nonce counter = %d, want %d", stream.chachaNonce, frames)
+ 			}
+ 		})
+ 	}
+@@ -339,7 +270,7 @@ func TestStreamAudioRedundancyPreservesCaptureGapsAndResets(t *testing.T) {
+ 		{PTS: base.Add(audioSamplesDuration(6170)), SourceRTP: 0, HasSourceRTP: true},
+ 	}
+ 	_, packets := streamAudioPacketsForTest(t, "AES", &positionedPCMFramesForTest{positions: positions}, len(positions))
+-	assertAudioPacketSequences(t, packets, []uint16{1, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 5, 6})
++	assertAudioPacketSequences(t, packets, []uint16{1, 2, 3, 4, 5, 6})
+ 	firstRTP := binary.BigEndian.Uint32(packets[0][4:8])
+ 	wantOffsets := []uint32{0, 352, 704, 5466, 5818, 6170}
+ 	for _, packet := range packets {
+@@ -408,7 +339,7 @@ func TestStreamAudioKeepsTimestampedFramesWithPositivePlayoutLead(t *testing.T)
+ 		t, "plaintext", reader, frames, AudioCodecALAC, false,
+ 		samplesFor44k1(85*time.Millisecond),
+ 	)
+-	assertAudioPacketSequences(t, packets, []uint16{1, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 5, 6})
++	assertAudioPacketSequences(t, packets, []uint16{1, 2, 3, 4, 5, 6})
+ }
+ 
+ func streamAudioPacketsForTest(t *testing.T, security string, frames audioPCMFrameReader, count int, rfc2198 ...bool) (*AudioStream, [][]byte) {
+@@ -530,6 +461,17 @@ func TestAudioCodecInfoKeepsScreenLatencyMinimumAtZero(t *testing.T) {
+ 	}
+ }
+ 
++func TestAudioClockAtNTPUsesBootTimeWithoutUnixEpoch(t *testing.T) {
++	session := &MirrorSession{}
++	timestamp, timelineID := session.audioClockAt(time.Now().Add(-50 * time.Millisecond))
++	if timelineID != 0 {
++		t.Fatalf("NTP timeline ID = %d, want 0", timelineID)
++	}
++	if seconds := timestamp >> 32; seconds >= secondsFrom1900To1970 {
++		t.Fatalf("audio NTP timestamp seconds = %d, unexpectedly contains the 1900 epoch", seconds)
++	}
++}
++
+ func TestAACELDCodecInfoMatchesAirPlayCompressionType(t *testing.T) {
+ 	ct, spf, format, latencyMin, latencyMax, latencySamples := AudioCodecAACELD.Info()
+ 	if ct != 8 || spf != 480 || format != 0x1000000 {
+diff --git a/internal/airplay/capture.go b/internal/airplay/capture.go
+index 13bc64d..897a079 100644
+--- a/internal/airplay/capture.go
++++ b/internal/airplay/capture.go
+@@ -19,7 +19,6 @@ import (
+ 	"strconv"
+ 	"strings"
+ 	"sync"
+-	"syscall"
+ 	"time"
+ 
+ 	"github.com/godbus/dbus/v5"
+@@ -779,7 +778,6 @@ func startGStreamerCommand(cmd *exec.Cmd) (<-chan error, error) {
+ 		runtime.LockOSThread()
+ 		defer runtime.UnlockOSThread()
+ 
+-		cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+ 		err := cmd.Start()
+ 		started <- err
+ 		if err != nil {
+diff --git a/internal/airplay/client.go b/internal/airplay/client.go
+index cf4fec8..9f594ff 100644
+--- a/internal/airplay/client.go
++++ b/internal/airplay/client.go
+@@ -375,6 +375,12 @@ type AirPlayClient struct {
+ 	streamKey []byte
+ 	streamIV  []byte
+ 
++	// FairPlayKeyMode optionally overrides how a raw pair-verify shared secret
++	// participates in the FairPlay stream key derivation. Empty keeps the
++	// capability-based default; "mixed" hashes the FairPlay key with the
++	// pair-verify secret; "raw" uses the FairPlay key directly.
++	FairPlayKeyMode string
++
+ 	// HTTP Digest credentials, used only when the receiver has "Require
+ 	// Password" enabled and challenges a request with 401. Pair-setup and
+ 	// Digest are separate protocols, but a non-empty Pair code is retained here
+@@ -871,7 +877,7 @@ func (c *AirPlayClient) httpRequestOnce(method, path, contentType string, body [
+ 	var buf bytes.Buffer
+ 	fmt.Fprintf(&buf, "%s %s RTSP/1.0\r\n", method, path)
+ 	fmt.Fprintf(&buf, "CSeq: %d\r\n", seq)
+-	fmt.Fprintf(&buf, "User-Agent: AirPlay/935.7.1\r\n")
++	fmt.Fprintf(&buf, "User-Agent: AirPlay/850.18.1\r\n")
+ 	for _, hdrs := range extraHeaders {
+ 		for k, v := range hdrs {
+ 			fmt.Fprintf(&buf, "%s: %s\r\n", k, v)
+@@ -912,7 +918,7 @@ func (c *AirPlayClient) rawRequest(method, path, contentType string, body []byte
+ 	var buf bytes.Buffer
+ 	fmt.Fprintf(&buf, "%s %s RTSP/1.0\r\n", method, path)
+ 	fmt.Fprintf(&buf, "Content-Type: %s\r\n", contentType)
+-	fmt.Fprintf(&buf, "User-Agent: AirPlay/935.7.1\r\n")
++	fmt.Fprintf(&buf, "User-Agent: AirPlay/850.18.1\r\n")
+ 	fmt.Fprintf(&buf, "X-Apple-ProtocolVersion: 1\r\n")
+ 	for _, hdrs := range extraHeaders {
+ 		for k, v := range hdrs {
+@@ -966,7 +972,7 @@ func (c *AirPlayClient) rtspRequestOnce(method, uri, contentType string, body []
+ 	var buf bytes.Buffer
+ 	fmt.Fprintf(&buf, "%s %s RTSP/1.0\r\n", method, uri)
+ 	fmt.Fprintf(&buf, "CSeq: %d\r\n", seq)
+-	fmt.Fprintf(&buf, "User-Agent: AirPlay/935.7.1\r\n")
++	fmt.Fprintf(&buf, "User-Agent: AirPlay/850.18.1\r\n")
+ 	// Do not send X-Apple-Session-ID here. Legacy CSeq/RAOP handlers can reject
+ 	// the combination, and the session is already identified by the TCP connection.
+ 	for k, v := range extraHeaders {
+diff --git a/internal/airplay/compatibility.go b/internal/airplay/compatibility.go
+index b398755..8acbd51 100644
+--- a/internal/airplay/compatibility.go
++++ b/internal/airplay/compatibility.go
+@@ -50,7 +50,7 @@ const (
+ )
+ 
+ func compatibilityForReceiver(info *ReceiverInfo, encrypted, audioEnabled bool) (receiverCompatibility, error) {
+-	audioCodec, err := screenAudioCodec(info, aacELDEncoderAvailable || !audioEnabled)
++	audioCodec, err := screenAudioCodec(info, aacELDEncoderAvailable() || !audioEnabled)
+ 	if err != nil && audioEnabled {
+ 		return receiverCompatibility{}, err
+ 	}
+diff --git a/internal/airplay/discovery.go b/internal/airplay/discovery.go
+index 94234d2..f9833fc 100644
+--- a/internal/airplay/discovery.go
++++ b/internal/airplay/discovery.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"encoding/base64"
+ 	"encoding/binary"
++	"errors"
+ 	"fmt"
+ 	"net"
+ 	"strconv"
+@@ -77,12 +78,27 @@ func (f *FeatureSet) UnmarshalPlist(unmarshal func(interface{}) error) error {
+ 
+ // DiscoverAirPlayDevices browses the local network for AirPlay receivers.
+ func DiscoverAirPlayDevices(ctx context.Context) ([]AirPlayDevice, error) {
++	var devices []AirPlayDevice
++	err := BrowseAirPlayDevices(ctx, func(device AirPlayDevice) {
++		devices = append(devices, device)
++	})
++	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
++		return nil, err
++	}
++	return devices, nil
++}
++
++// BrowseAirPlayDevices streams AirPlay advertisements until ctx is canceled.
++// Callers that need a low-latency cache can consume entries as they arrive
++// instead of waiting for the full browse deadline used by one-shot discovery.
++func BrowseAirPlayDevices(ctx context.Context, found func(AirPlayDevice)) error {
+ 	ifaces, traffic, err := airPlayMDNSInterfaces()
+ 	if err != nil {
+-		return nil, fmt.Errorf("mDNS interfaces: %w", err)
++		return fmt.Errorf("mDNS interfaces: %w", err)
+ 	}
+ 	if len(ifaces) == 0 {
+-		return nil, nil
++		<-ctx.Done()
++		return ctx.Err()
+ 	}
+ 
+ 	resolver, err := zeroconf.NewResolver(
+@@ -90,30 +106,30 @@ func DiscoverAirPlayDevices(ctx context.Context) ([]AirPlayDevice, error) {
+ 		zeroconf.SelectIPTraffic(traffic),
+ 	)
+ 	if err != nil {
+-		return nil, fmt.Errorf("zeroconf resolver: %w", err)
++		return fmt.Errorf("zeroconf resolver: %w", err)
+ 	}
+ 
+ 	entries := make(chan *zeroconf.ServiceEntry, 16)
+-	var devices []AirPlayDevice
++	if err := resolver.Browse(ctx, "_airplay._tcp", "local.", entries); err != nil {
++		return fmt.Errorf("browse: %w", err)
++	}
+ 
+-	done := make(chan struct{})
+-	go func() {
+-		defer close(done)
+-		for entry := range entries {
+-			dev := parseServiceEntry(entry)
+-			if dev != nil {
+-				devices = append(devices, *dev)
++	for {
++		select {
++		case <-ctx.Done():
++			return ctx.Err()
++		case entry := <-entries:
++			if entry == nil {
++				if err := ctx.Err(); err != nil {
++					return err
++				}
++				return fmt.Errorf("mDNS browse ended")
++			}
++			if dev := parseServiceEntry(entry); dev != nil && found != nil {
++				found(*dev)
+ 			}
+ 		}
+-	}()
+-
+-	if err := resolver.Browse(ctx, "_airplay._tcp", "local.", entries); err != nil {
+-		return nil, fmt.Errorf("browse: %w", err)
+ 	}
+-
+-	<-ctx.Done()
+-	<-done
+-	return devices, nil
+ }
+ 
+ func airPlayMDNSInterfaces() ([]net.Interface, zeroconf.IPType, error) {
+diff --git a/internal/airplay/mirror.go b/internal/airplay/mirror.go
+index 9878434..c8d7a20 100644
+--- a/internal/airplay/mirror.go
++++ b/internal/airplay/mirror.go
+@@ -31,7 +31,7 @@ const (
+ 	sessionInfoFallbackTimeout = 3 * time.Second
+ 
+ 	legacyAirPlaySourceVersion = "280.33"
+-	modernAirPlaySourceVersion = "980.71.1"
++	modernAirPlaySourceVersion = "850.18.1"
+ 
+ 	failedMirrorSetupTeardownTimeout = 2 * time.Second
+ )
+@@ -267,8 +267,10 @@ func (r mirrorSetupRequest) sessionPlist() map[string]interface{} {
+ 		"sourceVersion":            r.sourceVersion,
+ 		"isScreenMirroringSession": true,
+ 		"timingProtocol":           r.timingProtocol,
+-		"osBuildVersion":           "13F69",
+-		"model":                    "Linux",
++		"osName":                   "iPhone OS",
++		"osVersion":                "18.6",
++		"osBuildVersion":           "22G120",
++		"model":                    "iPhone16,1",
+ 		"name":                     r.name,
+ 	}
+ 	if r.timingProtocol == timingProtocolNTP {
+@@ -418,7 +420,7 @@ func (c *AirPlayClient) failedSetupTeardownOnce(uri string, extraHeaders map[str
+ 	var request bytes.Buffer
+ 	fmt.Fprintf(&request, "TEARDOWN %s RTSP/1.0\r\n", uri)
+ 	fmt.Fprintf(&request, "CSeq: %d\r\n", seq)
+-	fmt.Fprintf(&request, "User-Agent: AirPlay/935.7.1\r\n")
++	fmt.Fprintf(&request, "User-Agent: AirPlay/850.18.1\r\n")
+ 	for key, value := range extraHeaders {
+ 		fmt.Fprintf(&request, "%s: %s\r\n", key, value)
+ 	}
+diff --git a/internal/airplay/obs_external.go b/internal/airplay/obs_external.go
+new file mode 100644
+index 0000000..1d94d0e
+--- /dev/null
++++ b/internal/airplay/obs_external.go
+@@ -0,0 +1,49 @@
++package airplay
++
++import "time"
++
++// AccessUnitSource supplies timestamped Annex-B H.264 access units.
++// Implementations must return io.EOF after their input has been closed.
++type AccessUnitSource interface {
++	ReadVideoAccessUnit() (VideoAccessUnit, error)
++}
++
++// NewExternalVideoCapture adapts an external encoded-video source to the
++// capture surface consumed by MirrorSession.StreamFrames.
++func NewExternalVideoCapture(source AccessUnitSource) *ScreenCapture {
++	return &ScreenCapture{
++		frames:     source,
++		streamOnly: true,
++	}
++}
++
++// PCMFrameSource supplies interleaved stereo S16LE audio samples at 44.1 kHz.
++// The returned time identifies the first sample in dst.
++type PCMFrameSource interface {
++	ReadPCMFrame(dst []byte) (time.Time, error)
++}
++
++type externalPCMReader struct {
++	source PCMFrameSource
++}
++
++func (r *externalPCMReader) ReadPCMFrame(dst []byte) (time.Time, error) {
++	return r.source.ReadPCMFrame(dst)
++}
++
++// NewExternalAudioCapture adapts PCM supplied by an OBS audio callback to the
++// capture surface consumed by MirrorSession.StreamAudio.
++func NewExternalAudioCapture(codec AudioCodec, source PCMFrameSource) *AudioCapture {
++	return &AudioCapture{
++		codec:     codec,
++		pcmFrames: &externalPCMReader{source: source},
++	}
++}
++
++// VideoDimensions returns the canvas negotiated with the receiver.
++func (s *MirrorSession) VideoDimensions() (width, height int) {
++	if s == nil {
++		return 0, 0
++	}
++	return s.videoWidth, s.videoHeight
++}
+diff --git a/internal/airplay/pairing.go b/internal/airplay/pairing.go
+index 211f264..6b3414d 100644
+--- a/internal/airplay/pairing.go
++++ b/internal/airplay/pairing.go
+@@ -898,15 +898,23 @@ func nonceBytes(n uint64) []byte {
+ //	key = SHA-512("Pair-Verify-AES-Key" || X25519_shared_secret)[:16]
+ //	iv  = SHA-512("Pair-Verify-AES-IV"  || X25519_shared_secret)[:16]
+ func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
+-	// X-Apple-PD asks the receiver to apply the pair-verify shared secret to
+-	// FairPlay key derivation. Raw receivers split on feature 27: those advertising
+-	// the original legacy-pairing capability require the unmixed key path, while
+-	// those without it require PD mixing. Keep this exception capability-based.
+-	mixFairPlayKey := c.info == nil || !c.info.SupportsLegacyPairing()
++	// Modern raw pair-verify receivers still use the X25519 shared secret when
++	// deriving the FairPlay stream key. Feature 27 describes pairing support,
++	// not whether FairPlay mixing is disabled; Douyin advertises legacy pairing
++	// yet decrypts video only with the mixed key. Keep a diagnostic override for
++	// receivers that genuinely need the unmixed legacy path.
++	mixFairPlayKey := true
++	switch c.FairPlayKeyMode {
++	case "mixed":
++		mixFairPlayKey = true
++	case "raw":
++		mixFairPlayKey = false
++	}
+ 	var verifyHeaders map[string]string
+ 	if mixFairPlayKey {
+ 		verifyHeaders = map[string]string{"X-Apple-PD": "1"}
+ 	}
++	dbg("[RAW-PV] FairPlay key mode=%s (X-Apple-PD=%t)", c.FairPlayKeyMode, mixFairPlayKey)
+ 
+ 	// Generate ephemeral X25519 key pair
+ 	var clientPrivate [32]byte
+diff --git a/internal/airplay/pairing_negotiation_test.go b/internal/airplay/pairing_negotiation_test.go
+index ac759bd..91dabcb 100644
+--- a/internal/airplay/pairing_negotiation_test.go
++++ b/internal/airplay/pairing_negotiation_test.go
+@@ -84,63 +84,84 @@ func TestTransientPairingFallsBackFromUnsupportedHAPToRawByProtocol(t *testing.T
+ 	}
+ }
+ 
+-func TestRawLegacyPairingOmitsPDAndDoesNotMixFairPlayKey(t *testing.T) {
+-	state := newReceiverPairingTestState(t, "", newReceiverControllerStore())
+-	clientConn, serverConn := newPairingNegotiationPipe(t)
+-	defer clientConn.Close()
+-	defer serverConn.Close()
+-
+-	client := &AirPlayClient{
+-		conn:      clientConn,
+-		PairingID: "12345678-1234-4234-8234-123456789abc",
+-		info: &ReceiverInfo{
+-			Name:     "Identity Does Not Select Pairing",
+-			Model:    "Arbitrary1,2",
+-			Features: FeatureLegacyPairing,
++func TestRawLegacyPairingFairPlayKeyMode(t *testing.T) {
++	for _, tc := range []struct {
++		name       string
++		mode       string
++		wantPD     string
++		wantMixKey bool
++	}{
++		{
++			name:       "default mixes shared secret",
++			wantPD:     "1",
++			wantMixKey: true,
+ 		},
+-	}
+-	serverDone := make(chan error, 1)
+-	go func() {
+-		reader := bufio.NewReader(serverConn)
+-		for requestIndex := 0; requestIndex < 3; requestIndex++ {
+-			request, err := readRTSPTestRequest(reader)
+-			if err != nil {
+-				serverDone <- err
+-				return
+-			}
+-			if got := request.headers["x-apple-pd"]; got != "" {
+-				serverDone <- fmt.Errorf("request %d X-Apple-PD = %q, want omitted", requestIndex+1, got)
+-				return
+-			}
+-			var response []byte
+-			switch request.uri {
+-			case "/pair-setup":
+-				response, err = state.pairSetup(request.body)
+-			case "/pair-verify":
+-				response, err = state.pairVerify(request.body)
+-			default:
+-				err = fmt.Errorf("request %d path = %q", requestIndex+1, request.uri)
++		{
++			name:       "explicit raw override",
++			mode:       "raw",
++			wantMixKey: false,
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			state := newReceiverPairingTestState(t, "", newReceiverControllerStore())
++			clientConn, serverConn := newPairingNegotiationPipe(t)
++			defer clientConn.Close()
++			defer serverConn.Close()
++
++			client := &AirPlayClient{
++				conn:            clientConn,
++				PairingID:       "12345678-1234-4234-8234-123456789abc",
++				FairPlayKeyMode: tc.mode,
++				info: &ReceiverInfo{
++					Name:     "Identity Does Not Select Pairing",
++					Model:    "Arbitrary1,2",
++					Features: FeatureLegacyPairing,
++				},
+ 			}
+-			if err != nil {
+-				serverDone <- err
+-				return
++			serverDone := make(chan error, 1)
++			go func() {
++				reader := bufio.NewReader(serverConn)
++				for requestIndex := 0; requestIndex < 3; requestIndex++ {
++					request, err := readRTSPTestRequest(reader)
++					if err != nil {
++						serverDone <- err
++						return
++					}
++					if got := request.headers["x-apple-pd"]; got != tc.wantPD {
++						serverDone <- fmt.Errorf("request %d X-Apple-PD = %q, want %q", requestIndex+1, got, tc.wantPD)
++						return
++					}
++					var response []byte
++					switch request.uri {
++					case "/pair-setup":
++						response, err = state.pairSetup(request.body)
++					case "/pair-verify":
++						response, err = state.pairVerify(request.body)
++					default:
++						err = fmt.Errorf("request %d path = %q", requestIndex+1, request.uri)
++					}
++					if err != nil {
++						serverDone <- err
++						return
++					}
++					if err := writeRTSPTestResponse(serverConn, 200, nil, response); err != nil {
++						serverDone <- err
++						return
++					}
++				}
++				serverDone <- nil
++			}()
++
++			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++			defer cancel()
++			if err := client.Pair(ctx, ""); err != nil {
++				t.Fatalf("Pair: %v", err)
+ 			}
+-			if err := writeRTSPTestResponse(serverConn, 200, nil, response); err != nil {
+-				serverDone <- err
+-				return
++			waitPairingTestServer(t, serverDone)
++			if client.PairKeys == nil || client.PairKeys.MixFairPlayKey != tc.wantMixKey {
++				t.Fatalf("MixFairPlayKey = %t, want %t", client.PairKeys != nil && client.PairKeys.MixFairPlayKey, tc.wantMixKey)
+ 			}
+-		}
+-		serverDone <- nil
+-	}()
+-
+-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+-	defer cancel()
+-	if err := client.Pair(ctx, ""); err != nil {
+-		t.Fatalf("Pair: %v", err)
+-	}
+-	waitPairingTestServer(t, serverDone)
+-	if client.PairKeys == nil || client.PairKeys.MixFairPlayKey {
+-		t.Fatal("legacy raw pairing unexpectedly enabled FairPlay key mixing")
++		})
+ 	}
+ }
+ 
+diff --git a/internal/airplay/receiver_server_test.go b/internal/airplay/receiver_server_test.go
+index a14e72a..0b457c1 100644
+--- a/internal/airplay/receiver_server_test.go
++++ b/internal/airplay/receiver_server_test.go
+@@ -819,7 +819,7 @@ func TestReceiverServerAdvertisesCapabilityAxes(t *testing.T) {
+ 
+ func TestLoggedReceiverProfilesSelectAvailablePreferredAudio(t *testing.T) {
+ 	wantCodec := AudioCodecALAC
+-	if aacELDEncoderAvailable {
++	if aacELDEncoderAvailable() {
+ 		wantCodec = AudioCodecAACELD
+ 	}
+ 	for _, test := range []struct {
