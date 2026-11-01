@@ -118,8 +118,9 @@ $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\Co
 `Build-WindowsInstaller.ps1` 只校验发布目录、调用 `ISCC.exe` 并生成 `.sha256`。
 安装器默认安装到
 `%ProgramData%\obs-studio\plugins\obs-airplay-cast`，安装与升级不主动请求管理员
-权限。检测到旧版 `obs-airplay-cast` 时，会先调用旧卸载程序；只有这一步可能继承旧版的
-UAC 请求。打包脚本不在编译完成后自动执行安装测试。
+权限。检测到旧版 `obs-airplay-cast` 时，会优先调用 Inno Setup 的 `unins000.exe`，
+并兼容旧版 `Uninstall.exe`；如果旧目录没有卸载器，则直接覆盖升级。只有调用旧卸载器
+这一步可能继承旧版的 UAC 请求。打包脚本不在编译完成后自动执行安装测试。
 
 ## 合成输入探针
 

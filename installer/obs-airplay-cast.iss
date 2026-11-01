@@ -1,9 +1,9 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.4"
+  #define MyAppVersion "0.1.5"
 #endif
 
 #ifndef MyVersionInfoVersion
-  #define MyVersionInfoVersion "0.1.4.0"
+  #define MyVersionInfoVersion "0.1.5.0"
 #endif
 
 #ifndef MyReleaseDirectory
@@ -100,6 +100,7 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   LegacyDirectory: String;
   LegacyDll: String;
+  LegacyArguments: String;
   LegacyUninstaller: String;
   ResultCode: Integer;
   Attempt: Integer;
@@ -111,18 +112,25 @@ begin
   if not FileExists(LegacyDll) then
     Exit;
 
-  LegacyUninstaller := AddBackslash(LegacyDirectory) + 'Uninstall.exe';
-  if not FileExists(LegacyUninstaller) then
+  LegacyUninstaller := AddBackslash(LegacyDirectory) + 'unins000.exe';
+  if FileExists(LegacyUninstaller) then
+    LegacyArguments := '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART'
+  else
   begin
-    Result :=
-      '检测到旧版系统级 AirPlay 插件，但找不到它的卸载程序。' + #13#10 +
-      '请先手动删除：' + #13#10 + LegacyDirectory;
-    Exit;
+    LegacyUninstaller := AddBackslash(LegacyDirectory) + 'Uninstall.exe';
+    if FileExists(LegacyUninstaller) then
+      LegacyArguments := '--uninstall --silent'
+    else
+    begin
+      { Manually copied or incomplete legacy installs have no uninstaller.
+        The regular [Files] step can safely overwrite their plugin payload. }
+      Exit;
+    end;
   end;
 
   if not Exec(
     LegacyUninstaller,
-    '--uninstall --silent',
+    LegacyArguments,
     '',
     SW_HIDE,
     ewWaitUntilTerminated,

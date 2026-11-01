@@ -14,8 +14,10 @@
 使用固定的 `AppId` 和 `UsePreviousAppDir=yes`，已有用户目录会被继续沿用。
 
 如果目标目录中检测到旧版 `bin\64bit\obs-airplay-cast.dll`，安装器会在
-`PrepareToInstall` 阶段调用该目录中的旧版 `Uninstall.exe`。这个旧卸载器自身可能需要
-一次 UAC；清理完成后 Inno Setup 继续安装到同一目录。
+`PrepareToInstall` 阶段优先调用 Inno Setup 生成的 `unins000.exe`，并兼容旧版
+`Uninstall.exe`。如果旧目录没有卸载器，则直接由文件安装步骤覆盖升级，不再要求用户
+手动删除目录。旧卸载器自身可能需要一次 UAC；清理完成后 Inno Setup 继续安装到同一
+目录。
 
 构建：
 

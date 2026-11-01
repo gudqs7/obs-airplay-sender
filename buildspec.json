@@ -38,7 +38,7 @@
     },
     "name": "obs-airplay-cast",
     "displayName": "OBS AirPlay Cast",
-    "version": "0.1.4",
+    "version": "0.1.5",
     "author": "gudqs7",
     "website": "https://github.com/gudqs7/obs-airplay-sender",
     "email": ""
