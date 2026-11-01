@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "airplay-auto-cast.hpp"
+#include "airplay-packet-timing.hpp"
 #include "airplay-receiver.hpp"
 #include "airplay-settings.hpp"
 
@@ -68,6 +69,26 @@ int main()
 	expect(decide_auto_cast_monitor_action(true, AirPlayCastState::Stopped) ==
 		       AutoCastMonitorAction::Scan,
 	       "armed monitor must scan again after a receiver disconnect");
+
+	expect(decide_initial_scan_action(true, true) == InitialScanAction::WaitForAutoCast,
+	       "auto-cast waiting must not start a second scan status line");
+	expect(decide_initial_scan_action(true, false) == InitialScanAction::Scan,
+	       "manual mode should keep the existing initial scan behavior");
+	expect(decide_initial_scan_action(false, false) == InitialScanAction::ShowStopBeforeScan,
+	       "an active cast should keep the stop-before-scan message");
+
+	expect(normalize_playout_latency_ms(0) == 0, "zero playout latency should select automatic mode");
+	expect(normalize_playout_latency_ms(150) == 150, "explicit playout latency should be preserved");
+	expect(normalize_playout_latency_ms(50) == 80, "sub-minimum playout latency should clamp to 80 ms");
+	expect(normalize_playout_latency_ms(501) == 0, "out-of-range playout latency should fall back to auto");
+
+	expect(ticks_to_usec(2, 60) == 33333, "OBS timebase should convert to microseconds");
+	expect(encoder_packet_system_pts_usec(1000000, 3, 1, 60) == 1033333,
+	       "system PTS should include the packet composition offset");
+	expect(encoder_packet_system_pts_usec(1000000, 10, 10, 60) == 1000000,
+	       "system PTS should equal system DTS when PTS and DTS match");
+	expect(encoder_packet_system_pts_usec(1000000, 10, 0, 0) == 1000000,
+	       "invalid timebase should preserve the OBS system DTS fallback");
 
 	std::cout << "airplay-receiver tests passed\n";
 	return 0;

@@ -12,6 +12,7 @@
 #include <util/config-file.h>
 #include <util/platform.h>
 
+#include "airplay-packet-timing.hpp"
 #include "airplay-settings.hpp"
 
 namespace {
@@ -21,6 +22,7 @@ constexpr const char *kTargetIPKey = "TargetIP";
 constexpr const char *kTargetPortKey = "TargetPort";
 constexpr const char *kFPSKey = "FPS";
 constexpr const char *kBitrateKey = "BitrateKbps";
+constexpr const char *kPlayoutLatencyKey = "PlayoutLatencyMs";
 constexpr const char *kAutoCastOnObsStartKey = "AutoCastOnObsStart";
 
 struct AirPlayOutputContext {
@@ -168,6 +170,8 @@ AirPlayCastSettings load_airplay_cast_settings()
 	const int bitrate = static_cast<int>(config_get_int(config, "AirPlayCast", kBitrateKey));
 	if (bitrate >= 4000 && bitrate <= 30000)
 		settings.bitrate_kbps = bitrate;
+	settings.playout_latency_ms = normalize_playout_latency_ms(
+		static_cast<int>(config_get_int(config, "AirPlayCast", kPlayoutLatencyKey)));
 	settings.auto_cast_on_obs_start = resolve_auto_cast_on_obs_start(
 		config_has_user_value(config, "AirPlayCast", kAutoCastOnObsStartKey),
 		config_get_bool(config, "AirPlayCast", kAutoCastOnObsStartKey));
@@ -184,6 +188,7 @@ void save_airplay_cast_settings(const AirPlayCastSettings &settings)
 	config_set_int(config, "AirPlayCast", kTargetPortKey, settings.target_port);
 	config_set_int(config, "AirPlayCast", kFPSKey, settings.fps);
 	config_set_int(config, "AirPlayCast", kBitrateKey, settings.bitrate_kbps);
+	config_set_int(config, "AirPlayCast", kPlayoutLatencyKey, settings.playout_latency_ms);
 	config_set_bool(config, "AirPlayCast", kAutoCastOnObsStartKey, settings.auto_cast_on_obs_start);
 	config_save(config);
 }
@@ -240,6 +245,7 @@ void AirPlayCast::StartThread(AirPlayCastSettings settings)
 	bridge_config.password = settings.password;
 	bridge_config.fps = settings.fps;
 	bridge_config.bitrate_kbps = settings.bitrate_kbps;
+	bridge_config.playout_latency_ms = settings.playout_latency_ms;
 
 	AirPlaySessionInfo info;
 	std::string error;
@@ -354,6 +360,7 @@ bool AirPlayCast::StartOutput(int receiver_width, int receiver_height, const Air
 	obs_data_set_string(encoder_settings, "rate_control", "CBR");
 	obs_data_set_int(encoder_settings, "keyint_sec", 1);
 	obs_data_set_string(encoder_settings, "profile", "high");
+	obs_data_set_int(encoder_settings, "bf", 0);
 	if (encoder_id == "obs_x264") {
 		obs_data_set_string(encoder_settings, "preset", "veryfast");
 		obs_data_set_string(encoder_settings, "tune", "zerolatency");
@@ -364,9 +371,13 @@ bool AirPlayCast::StartOutput(int receiver_width, int receiver_height, const Air
 		// lookahead create decode-order timestamps and add latency, which makes
 		// Douyin's receiver present only about one third of a 60 fps stream.
 		obs_data_set_string(encoder_settings, "tune", "ull");
-		obs_data_set_int(encoder_settings, "bf", 0);
 		obs_data_set_bool(encoder_settings, "lookahead", false);
 		obs_data_set_string(encoder_settings, "multipass", "disabled");
+	} else if (encoder_id.find("qsv") != std::string::npos) {
+		// OBS QSV defaults to three B-frames and a 60-frame lookahead. Both
+		// violate AirPlay's access-unit order and presentation-time contract.
+		obs_data_set_string(encoder_settings, "latency", "ultra-low");
+		obs_data_set_int(encoder_settings, "bframes", 0);
 	}
 
 	video_encoder_ = obs_video_encoder_create(encoder_id.c_str(), "obs-airplay-h264", encoder_settings, nullptr);
@@ -495,8 +506,10 @@ void AirPlayCast::HandleEncodedPacket(const encoder_packet *packet)
 	    !packet->data || packet->size == 0)
 		return;
 
-	const uint64_t timestamp = packet->sys_dts_usec > 0 ? static_cast<uint64_t>(packet->sys_dts_usec) * 1000ULL
-							    : os_gettime_ns();
+	const int64_t system_pts_usec =
+		encoder_packet_system_pts_usec(packet->sys_dts_usec, packet->pts, packet->dts, packet->timebase_den);
+	const uint64_t timestamp = system_pts_usec > 0 ? static_cast<uint64_t>(system_pts_usec) * 1000ULL
+						       : os_gettime_ns();
 	if (bridge_.PushVideo(packet->data, packet->size, timestamp)) {
 		bool expected = false;
 		if (first_video_seen_.compare_exchange_strong(expected, true)) {

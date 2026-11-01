@@ -346,6 +346,7 @@ bool AirPlayBridge::SendStart(const AirPlayBridgeConfig &config, AirPlaySessionI
 	obs_data_set_string(request, "password", config.password.c_str());
 	obs_data_set_int(request, "fps", config.fps);
 	obs_data_set_int(request, "bitrate", config.bitrate_kbps);
+	obs_data_set_int(request, "playoutLatencyMs", config.playout_latency_ms);
 	const char *json = obs_data_get_json(request);
 	std::string payload = json ? json : "{}";
 	obs_data_release(request);

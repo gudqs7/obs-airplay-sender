@@ -71,6 +71,11 @@ Go bridge 启动时：
 4. 启动视频和音频流工作线程。
 5. 音频选择 AAC-ELD 时，在第一次读取 PCM 帧时惰性启动 helper。
 
+视频和音频使用同一个 OBS 单调时钟基准。插件在启动 OBS output 前发送一次
+`clock` IPC，bridge 只在该会话内建立一次映射；断线后会话对象、队列和映射都会
+重新创建，不复用上一轮时间基准。视频使用系统 PTS 映射到 bridge 的展示时间，
+音频使用 44.1 kHz sample PTS 映射到同一会话时钟。
+
 ## 本机 IPC
 
 每个 IPC 包包含 24 字节 little-endian 包头：
@@ -98,6 +103,11 @@ Go bridge 启动时：
 
 payload 最大值由 bridge 限制为 32 MiB。视频 payload 可以是 Annex-B，也可以是四字节
 大端长度前缀的 H.264 NAL 序列；bridge 会统一转换为 Annex-B。
+
+当 AirPlay 视频 TCP 发送阻塞并填满 bridge 的 90 帧视频队列时，bridge 不再继续保留
+旧参考链：当前 generation 的积压帧会被丢弃，只接受下一个 IDR 及其后续帧。音频队列
+独立，并依据自身 PTS 丢弃已经错过播放 deadline 的帧。两个队列都保留原始时间戳，
+不会用“收到时间”重新锚定，以避免网络恢复后出现持续的音画偏移。
 
 ## AAC-ELD helper 边界
 

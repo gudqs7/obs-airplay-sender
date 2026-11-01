@@ -49,6 +49,7 @@ type startRequest struct {
 	Password         string `json:"password,omitempty"`
 	FPS              int    `json:"fps"`
 	Bitrate          int    `json:"bitrate"`
+	PlayoutLatencyMs int    `json:"playoutLatencyMs,omitempty"`
 	NoAudio          bool   `json:"noAudio,omitempty"`
 	DropAudioPackets bool   `json:"dropAudioPackets,omitempty"`
 	NoEncrypt        bool   `json:"noEncrypt,omitempty"`
@@ -270,21 +271,74 @@ func (c *discoveryCache) waitFor(preferred string, wait, settle time.Duration) (
 }
 
 type videoItem struct {
-	unit airplay.VideoAccessUnit
+	unit       airplay.VideoAccessUnit
+	generation uint64
 }
 
 type videoSource struct {
-	ctx context.Context
-	ch  chan videoItem
+	ctx               context.Context
+	ch                chan videoItem
+	generation        atomic.Uint64
+	awaitingKeyframe  atomic.Bool
+	backpressureDrops atomic.Uint64
 }
 
 func (s *videoSource) ReadVideoAccessUnit() (airplay.VideoAccessUnit, error) {
-	select {
-	case <-s.ctx.Done():
-		return airplay.VideoAccessUnit{}, io.EOF
-	case item := <-s.ch:
-		return item.unit, nil
+	for {
+		select {
+		case <-s.ctx.Done():
+			return airplay.VideoAccessUnit{}, io.EOF
+		case item := <-s.ch:
+			if item.generation != s.generation.Load() {
+				s.backpressureDrops.Add(1)
+				continue
+			}
+			if s.awaitingKeyframe.Load() {
+				if !containsIDRNAL(item.unit.AnnexB) {
+					s.backpressureDrops.Add(1)
+					continue
+				}
+				if s.awaitingKeyframe.CompareAndSwap(true, false) {
+					dropped := s.backpressureDrops.Swap(0)
+					log.Printf("[VIDEO] backpressure recovered at IDR after dropping %d queued frames", dropped)
+				}
+			}
+			if item.generation != s.generation.Load() {
+				s.backpressureDrops.Add(1)
+				continue
+			}
+			return item.unit, nil
+		}
 	}
+}
+
+func (s *videoSource) beginBackpressureRecovery() {
+	if s.awaitingKeyframe.Load() {
+		return
+	}
+	// Invalidate queued access units before publishing the recovery state.
+	// The IPC reader is the only producer, so this pair is ordered.
+	s.generation.Add(1)
+	s.awaitingKeyframe.Store(true)
+	log.Printf("[VIDEO] video queue backpressure: discarding the queued GOP and waiting for the next IDR")
+}
+
+func containsIDRNAL(annexB []byte) bool {
+	for offset := 0; offset+3 < len(annexB); offset++ {
+		start := -1
+		if annexB[offset] == 0 && annexB[offset+1] == 0 {
+			switch {
+			case annexB[offset+2] == 1:
+				start = offset + 3
+			case offset+3 < len(annexB) && annexB[offset+2] == 0 && annexB[offset+3] == 1:
+				start = offset + 4
+			}
+		}
+		if start >= 0 && start < len(annexB) && annexB[start]&0x1f == 5 {
+			return true
+		}
+	}
+	return false
 }
 
 type audioChunk struct {
@@ -293,11 +347,19 @@ type audioChunk struct {
 }
 
 type audioSource struct {
-	ctx    context.Context
-	ch     chan audioChunk
-	mu     sync.Mutex
-	buf    []byte
-	bufPTS time.Time
+	ctx             context.Context
+	ch              chan audioChunk
+	mu              sync.Mutex
+	buf             []byte
+	bufPTS          time.Time
+	bufOffsetFrames uint64
+}
+
+func pcmSamplesDuration(samples uint64) time.Duration {
+	seconds := samples / 44100
+	remainder := samples % 44100
+	return time.Duration(seconds)*time.Second +
+		time.Duration((remainder*uint64(time.Second)+44100/2)/44100)
 }
 
 func (s *audioSource) ReadPCMFrame(dst []byte) (time.Time, error) {
@@ -308,15 +370,16 @@ func (s *audioSource) ReadPCMFrame(dst []byte) (time.Time, error) {
 		case chunk := <-s.ch:
 			if len(s.buf) == 0 {
 				s.bufPTS = chunk.pts
+				s.bufOffsetFrames = 0
 			}
 			s.buf = append(s.buf, chunk.data...)
 		}
 	}
 
-	pts := s.bufPTS
+	pts := s.bufPTS.Add(pcmSamplesDuration(s.bufOffsetFrames))
 	copy(dst, s.buf[:len(dst)])
 	s.buf = s.buf[len(dst):]
-	s.bufPTS = pts.Add(time.Duration(len(dst)/4) * time.Second / 44100)
+	s.bufOffsetFrames += uint64(len(dst) / 4)
 	return pts, nil
 }
 
@@ -373,17 +436,23 @@ func (s *streamSession) pushVideo(obsNS uint64, data []byte) bool {
 		log.Printf("video packet rejected: %v", err)
 		return false
 	}
+	if s.video.awaitingKeyframe.Load() && !containsIDRNAL(annexB) {
+		s.video.backpressureDrops.Add(1)
+		return false
+	}
+	generation := s.video.generation.Load()
 	select {
 	case s.video.ch <- videoItem{unit: airplay.VideoAccessUnit{
 		AnnexB: annexB,
 		PTS:    s.mapTime(obsNS),
-	}}:
+	}, generation: generation}:
 		s.firstVideo.Do(func() {
 			log.Printf("[TIMING] start: first OBS video packet +%s",
 				time.Since(s.startedAt).Round(time.Millisecond))
 		})
 		return true
 	default:
+		s.video.beginBackpressureRecovery()
 		return false
 	}
 }
@@ -469,6 +538,16 @@ func startSession(parent context.Context, request startRequest, cache *discovery
 	}
 	if request.Bitrate < 2000 || request.Bitrate > 30000 {
 		return nil, fmt.Errorf("invalid bitrate %d kbps", request.Bitrate)
+	}
+	if request.PlayoutLatencyMs < 0 || request.PlayoutLatencyMs > 500 ||
+		(request.PlayoutLatencyMs > 0 && request.PlayoutLatencyMs < 80) {
+		return nil, fmt.Errorf("invalid playout latency %d ms", request.PlayoutLatencyMs)
+	}
+	airplay.SetTargetLatency(time.Duration(request.PlayoutLatencyMs) * time.Millisecond)
+	if request.PlayoutLatencyMs > 0 {
+		log.Printf("[SETUP] explicit joint playout lead: %d ms", request.PlayoutLatencyMs)
+	} else {
+		log.Printf("[SETUP] automatic playout latency selected")
 	}
 
 	ctx, cancel := context.WithCancel(parent)

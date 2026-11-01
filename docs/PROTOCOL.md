@@ -34,11 +34,23 @@ stream_key = SHA-512(fairplay_aes_key || x25519_shared_secret)[:16]
 - profile：High。
 - 码率控制：CBR。
 - 关键帧间隔：1 秒。
-- 不使用 B 帧或编码器前瞻。AirPlay 接收端按收到访问单元的顺序消费视频；
+- 不使用 B 帧或编码器前瞻。OBS QSV 默认会启用 3 个 B 帧和 60 帧前瞻，
+  因此 QSV 路径必须显式使用 `ultra-low` latency、`bframes=0`。AirPlay
+  接收端按收到访问单元的顺序消费视频；
   实测 NVENC `B-frames=2`、8 帧 lookahead 时，抖音虽然收到 60 fps，但解码输出
   只有约 21 fps。NVENC 必须使用超低延迟调优、`bf=0`、`lookahead=false`。
 - 输出尺寸：按接收端协商画布等比缩放，宽高保持偶数。
 - OBS 编码包通过回环 IPC 传送到 bridge，bridge 转换为 Annex-B access unit。
+- 送给 bridge 的时间戳是系统 PTS，不是系统 DTS。OBS 的 `sys_dts_usec` 只在
+  PTS/DTS 相同时直接使用；存在 composition offset 时必须加上
+  `(pts-dts) × 1000000 / timebase_den`，不能把 DTS 当作展示时间。
+- 设置窗口的“音画缓冲”使用 `0..500 ms`。`0` 保留自动低延迟策略；非零值通过
+  `SetTargetLatency` 同时扩大视频和音频播放前置量，用于吸收网络单向延迟和抖动。
+  非零值最小为 `80 ms`，低于该值会因 OBS 音频采集年龄而无法建立稳定播放前置量。
+  50 ms 网络延迟至少应测试 `150 ms` 音画缓冲。
+- 视频 TCP 背压导致 bridge 队列满时，异常路径会放弃旧 GOP，等到下一个 IDR
+  再恢复。继续发送旧参考链会让视频停留在历史时间轴，而音频会按过期 deadline
+  前进，最终表现为音画漂移。
 
 HEVC 不属于当前抖音验收路径。
 
@@ -113,6 +125,10 @@ ASC 长度。
 `EOF`。后一种行为会造成 AirPlay 协商成功、只出现 `Audio_Open_Multi`，随后第一帧音频
 立即结束。
 
+AAC-ELD 的每个 access unit 都是 480 samples。OBS 的 44.1 kHz raw audio callback
+可能一次提供 1024 samples，`audioSource` 必须在 chunk 内按 480 samples 切分，并从
+该 chunk 的 PTS 按 sample 数递推；不能把每个 OBS callback 当作一个 AAC-ELD 帧。
+
 ## 音频验收日志
 
 一次成功的会话通常依次出现：
@@ -158,6 +174,7 @@ Windows 音频会话探针只能检查会话、音量和端点，不能替代接
 - 不要用 ALAC `spf=352` 解决抖音无声。
 - 不要依据 `codecType=2` 判断 AAC-ELD。
 - 不要把 AAC helper 改成 ADTS。
+- 不要把 QSV 回退路径恢复为 B 帧或 lookahead。
 - 不要在 Go 中写死 helper 的绝对路径。
 - 不要删除外部音频捕获中的惰性编码器初始化。
 - 不要覆盖正在被 OBS 加载的 DLL。

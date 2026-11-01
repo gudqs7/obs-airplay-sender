@@ -36,6 +36,7 @@
 #include "airplay-auto-cast.hpp"
 #include "airplay-cast.hpp"
 #include "airplay-receiver.hpp"
+#include "airplay-settings.hpp"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -257,6 +258,21 @@ void show_settings_dialog()
 	bitrate->setValue(settings.bitrate_kbps);
 	form->addRow(obs_module_text("Settings.Bitrate"), bitrate);
 
+	auto *playout_latency = new QSpinBox();
+	playout_latency->setRange(0, 500);
+	playout_latency->setSingleStep(10);
+	playout_latency->setKeyboardTracking(false);
+	playout_latency->setSuffix(QStringLiteral(" ms"));
+	playout_latency->setSpecialValueText(obs_module_text("Settings.LatencyAuto"));
+	playout_latency->setToolTip(obs_module_text("Settings.LatencyTooltip"));
+	playout_latency->setValue(settings.playout_latency_ms);
+	QObject::connect(playout_latency, qOverload<int>(&QSpinBox::valueChanged), playout_latency,
+			 [playout_latency](int value) {
+				 if (value > 0 && value < 80)
+					 playout_latency->setValue(80);
+			 });
+	form->addRow(obs_module_text("Settings.Latency"), playout_latency);
+
 	auto *auto_cast = new QCheckBox(obs_module_text("Settings.AutoCastOnObsStart"));
 	auto_cast->setChecked(settings.auto_cast_on_obs_start);
 	form->addRow(auto_cast);
@@ -319,10 +335,13 @@ void show_settings_dialog()
 		target->setCurrentIndex(preferred_index >= 0 ? preferred_index : select_index);
 
 		if (!result.ok) {
+			scan_status->setVisible(true);
 			scan_status->setText(QString::fromUtf8(result.error.c_str()));
 		} else if (result.devices.empty()) {
+			scan_status->setVisible(true);
 			scan_status->setText(obs_module_text("Settings.NoDevices"));
 		} else {
+			scan_status->setVisible(true);
 			scan_status->setText(
 				QString::fromUtf8(obs_module_text("Settings.Found")).arg(result.devices.size()));
 		}
@@ -355,6 +374,7 @@ void show_settings_dialog()
 		if (scanning->exchange(true))
 			return;
 		scan_button->setEnabled(false);
+		scan_status->setVisible(true);
 		scan_status->setText(obs_module_text("Settings.Scanning"));
 		try {
 			*scan_future = std::async(std::launch::async, [cast = g_airplay_cast.get(),
@@ -377,6 +397,7 @@ void show_settings_dialog()
 		}
 		settings.fps = fps->currentData().toInt();
 		settings.bitrate_kbps = bitrate->value();
+		settings.playout_latency_ms = playout_latency->value();
 		settings.auto_cast_on_obs_start = auto_cast->isChecked();
 		save_airplay_cast_settings(settings);
 	};
@@ -392,6 +413,7 @@ void show_settings_dialog()
 		scan_button->setEnabled(enabled);
 		fps->setEnabled(enabled);
 		bitrate->setEnabled(enabled);
+		playout_latency->setEnabled(enabled);
 		auto_cast->setEnabled(enabled);
 	};
 
@@ -476,14 +498,26 @@ void show_settings_dialog()
 	});
 	state_timer->start();
 
-	if (g_airplay_cast && g_airplay_cast->State() == AirPlayCastState::Stopped) {
-		if (AutoCastWaiting())
-			scan_status->setText(obs_module_text("Status.AutoWaiting"));
-		else
-			scan();
-	} else {
+	if (!g_airplay_cast) {
 		scan_button->setEnabled(false);
-		scan_status->setText(obs_module_text("Settings.StopBeforeScan"));
+		scan_status->setVisible(false);
+	} else {
+		const bool cast_stopped = g_airplay_cast->State() == AirPlayCastState::Stopped;
+		switch (decide_initial_scan_action(cast_stopped, AutoCastWaiting())) {
+		case InitialScanAction::WaitForAutoCast:
+			// The auto-cast wait state is owned by cast_status. Keeping this
+			// label empty prevents the same status from appearing twice.
+			scan_status->setVisible(false);
+			break;
+		case InitialScanAction::Scan:
+			scan();
+			break;
+		case InitialScanAction::ShowStopBeforeScan:
+			scan_button->setEnabled(false);
+			scan_status->setVisible(true);
+			scan_status->setText(obs_module_text("Settings.StopBeforeScan"));
+			break;
+		}
 	}
 
 	refresh_state();

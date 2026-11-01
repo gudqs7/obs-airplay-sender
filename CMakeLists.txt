@@ -118,6 +118,7 @@ target_sources(
     src/airplay-auto-cast.hpp
     src/airplay-bridge.cpp
     src/airplay-bridge.hpp
+    src/airplay-packet-timing.hpp
     src/airplay-receiver.hpp
     src/airplay-settings.hpp
 )

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,6 +123,111 @@ func TestStreamSessionStopReportsStoppedState(t *testing.T) {
 
 	close(session.finished)
 	session.wait(10 * time.Millisecond)
+}
+
+func TestStreamSessionClockMappingIsStableAndSessionLocal(t *testing.T) {
+	base := uint64(10 * time.Second)
+	first := &streamSession{}
+	first.setClock(base)
+	first.setClock(base + uint64(5*time.Second))
+
+	if got := first.mapTime(base + uint64(100*time.Millisecond)).Sub(first.mapTime(base)); got != 100*time.Millisecond {
+		t.Fatalf("first session clock delta = %v, want 100ms", got)
+	}
+	if got := first.mapTime(base + uint64(200*time.Millisecond)).Sub(first.mapTime(base)); got != 200*time.Millisecond {
+		t.Fatalf("second clock packet moved an established session mapping: delta=%v", got)
+	}
+
+	reconnected := &streamSession{}
+	reconnectBase := base + uint64(10*time.Minute)
+	reconnected.setClock(reconnectBase)
+	if got := reconnected.mapTime(reconnectBase + uint64(100*time.Millisecond)).Sub(reconnected.mapTime(reconnectBase)); got != 100*time.Millisecond {
+		t.Fatalf("reconnected session clock delta = %v, want 100ms", got)
+	}
+}
+
+func TestStartRequestRejectsInvalidPlayoutLatency(t *testing.T) {
+	for _, latency := range []int{-1, 50, 501} {
+		request := startRequest{FPS: 60, Bitrate: 8000, PlayoutLatencyMs: latency}
+		if _, err := startSession(context.Background(), request, nil); err == nil ||
+			!strings.Contains(err.Error(), "invalid playout latency") {
+			t.Fatalf("latency %d error = %v, want playout latency rejection", latency, err)
+		}
+	}
+}
+
+func TestAudioSourcePreservesSubframeAACELDPTS(t *testing.T) {
+	chunks := make(chan audioChunk, 2)
+	base := time.Unix(1700000000, 0)
+	const chunkFrames = 1024
+	chunks <- audioChunk{data: make([]byte, chunkFrames*4), pts: base}
+	chunks <- audioChunk{
+		data: make([]byte, chunkFrames*4),
+		pts:  base.Add(pcmSamplesDuration(chunkFrames)),
+	}
+	source := &audioSource{ctx: context.Background(), ch: chunks}
+	frame := make([]byte, 480*4)
+	for index := 0; index < 4; index++ {
+		pts, err := source.ReadPCMFrame(frame)
+		if err != nil {
+			t.Fatalf("read frame %d: %v", index, err)
+		}
+		want := base.Add(pcmSamplesDuration(uint64(index * 480)))
+		if !pts.Equal(want) {
+			t.Fatalf("frame %d PTS = %v, want %v", index, pts, want)
+		}
+	}
+}
+
+func TestVideoSourceRecoversFromBackpressureAtNextIDR(t *testing.T) {
+	source := &videoSource{
+		ctx: context.Background(),
+		ch:  make(chan videoItem, 3),
+	}
+	oldGeneration := source.generation.Load()
+	source.ch <- videoItem{
+		generation: oldGeneration,
+		unit:       airplay.VideoAccessUnit{AnnexB: []byte{0, 0, 0, 1, 0x61, 0x01}},
+	}
+	source.ch <- videoItem{
+		generation: oldGeneration,
+		unit:       airplay.VideoAccessUnit{AnnexB: []byte{0, 0, 0, 1, 0x41, 0x01}},
+	}
+	source.beginBackpressureRecovery()
+	source.ch <- videoItem{
+		generation: source.generation.Load(),
+		unit:       airplay.VideoAccessUnit{AnnexB: []byte{0, 0, 0, 1, 0x65, 0x01}},
+	}
+
+	unit, err := source.ReadVideoAccessUnit()
+	if err != nil {
+		t.Fatalf("read recovered access unit: %v", err)
+	}
+	if !containsIDRNAL(unit.AnnexB) {
+		t.Fatalf("recovered access unit is not an IDR: %x", unit.AnnexB)
+	}
+	if source.awaitingKeyframe.Load() {
+		t.Fatal("video source remained in recovery after an IDR")
+	}
+}
+
+func TestContainsIDRNAL(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		data []byte
+		want bool
+	}{
+		{name: "three-byte start", data: []byte{0, 0, 1, 0x65, 0x01}, want: true},
+		{name: "four-byte start", data: []byte{0, 0, 0, 1, 0x65, 0x01}, want: true},
+		{name: "non-idr", data: []byte{0, 0, 1, 0x41, 0x01}, want: false},
+		{name: "empty", data: nil, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := containsIDRNAL(test.data); got != test.want {
+				t.Fatalf("containsIDRNAL(%x) = %t, want %t", test.data, got, test.want)
+			}
+		})
+	}
 }
 
 func TestHandleConnectionReportsIdleStatus(t *testing.T) {

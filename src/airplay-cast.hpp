@@ -22,6 +22,7 @@ struct AirPlayCastSettings {
 	std::string password;
 	int fps = 60;
 	int bitrate_kbps = 12000;
+	int playout_latency_ms = 0;
 	bool auto_cast_on_obs_start = true;
 };
 
