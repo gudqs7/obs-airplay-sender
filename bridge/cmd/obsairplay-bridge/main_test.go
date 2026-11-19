@@ -146,6 +146,56 @@ func TestStreamSessionClockMappingIsStableAndSessionLocal(t *testing.T) {
 	}
 }
 
+func TestAlignAudioTimestampRebasesImplausibleOBSClock(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	mapped := now.Add(-1100 * time.Millisecond)
+
+	aligned, offset, rebased := alignAudioTimestamp(mapped, now, 0, false)
+	if !rebased {
+		t.Fatal("stale initial audio timestamp was not rebased")
+	}
+	if !aligned.Equal(now) {
+		t.Fatalf("aligned timestamp = %v, want %v", aligned, now)
+	}
+	if offset != 1100*time.Millisecond {
+		t.Fatalf("clock offset = %v, want 1.1s", offset)
+	}
+
+	later := now.Add(10 * time.Millisecond)
+	aligned, offset, rebased = alignAudioTimestamp(later.Add(-1100*time.Millisecond), later, offset, true)
+	if rebased {
+		t.Fatal("plausible steady-state timestamp should not be rebased")
+	}
+	if !aligned.Equal(later) || offset != 1100*time.Millisecond {
+		t.Fatalf("steady-state alignment = (%v, %v), want (%v, 1.1s)",
+			aligned, offset, later)
+	}
+}
+
+func TestAlignAudioTimestampRebasesLargeRuntimeJump(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	aligned, offset, rebased := alignAudioTimestamp(now.Add(-3*time.Second), now, 0, true)
+	if !rebased || !aligned.Equal(now) || offset != 3*time.Second {
+		t.Fatalf("runtime jump result = (%v, %v, %t), want (%v, 3s, true)",
+			aligned, offset, rebased, now)
+	}
+}
+
+func TestStreamSessionRebasesStaleOBSAudioClock(t *testing.T) {
+	audio := &audioSource{ctx: context.Background(), ch: make(chan audioChunk, 1)}
+	session := &streamSession{audio: audio}
+	const obsBase = uint64(10 * time.Second)
+	session.setClock(obsBase)
+
+	if !session.pushAudio(obsBase-uint64(time.Second), []byte{1, 2, 3, 4}) {
+		t.Fatal("pushAudio rejected a valid stereo PCM frame")
+	}
+	chunk := <-audio.ch
+	if age := time.Since(chunk.pts); age > 100*time.Millisecond {
+		t.Fatalf("stale OBS audio timestamp was not rebased: age=%v", age)
+	}
+}
+
 func TestStartRequestRejectsInvalidPlayoutLatency(t *testing.T) {
 	for _, latency := range []int{-1, 50, 501} {
 		request := startRequest{FPS: 60, Bitrate: 8000, PlayoutLatencyMs: latency}

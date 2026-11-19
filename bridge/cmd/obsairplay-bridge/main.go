@@ -87,10 +87,13 @@ type discoverRequest struct {
 }
 
 const (
-	discoveryRefreshInterval = 5 * time.Second
-	discoveryStaleAfter      = 12 * time.Second
-	discoveryWaitLimit       = 900 * time.Millisecond
-	discoverySettleWindow    = 150 * time.Millisecond
+	discoveryRetryInterval = 2 * time.Second
+	discoveryStaleAfter    = 12 * time.Second
+	discoveryWaitLimit     = 900 * time.Millisecond
+	discoverySettleWindow  = 150 * time.Millisecond
+
+	audioClockInitialRebaseThreshold = 500 * time.Millisecond
+	audioClockRuntimeRebaseThreshold = 500 * time.Millisecond
 )
 
 type cachedDevice struct {
@@ -131,18 +134,24 @@ func (c *discoveryCache) stop() {
 }
 
 func (c *discoveryCache) run() {
+	var lastError string
+	var lastErrorAt time.Time
 	for c.ctx.Err() == nil {
-		browseCtx, cancel := context.WithTimeout(c.ctx, discoveryRefreshInterval)
-		err := airplay.BrowseAirPlayDevices(browseCtx, c.observe)
-		cancel()
+		err := airplay.BrowseAirPlayDevices(c.ctx, c.observe)
 		if c.ctx.Err() != nil {
 			return
 		}
-		if err != nil && !errors.Is(err, context.DeadlineExceeded) &&
-			!errors.Is(err, context.Canceled) {
-			log.Printf("mDNS cache browse error: %v", err)
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			now := time.Now()
+			if err.Error() != lastError || now.Sub(lastErrorAt) >= time.Minute {
+				log.Printf("mDNS cache browse error: %v", err)
+				lastError = err.Error()
+				lastErrorAt = now
+			}
+		} else {
+			lastError = ""
 		}
-		timer := time.NewTimer(100 * time.Millisecond)
+		timer := time.NewTimer(discoveryRetryInterval)
 		select {
 		case <-c.ctx.Done():
 			timer.Stop()
@@ -353,6 +362,49 @@ type audioSource struct {
 	buf             []byte
 	bufPTS          time.Time
 	bufOffsetFrames uint64
+	clockOffset     time.Duration
+	clockCalibrated bool
+}
+
+// alignAudioTimestamp keeps a stable source-clock offset for the session. OBS
+// can deliver an audio callback whose timestamp is a second behind the session
+// clock after an audio-device reset or a long main-thread stall. Treating that
+// as permanently stale makes doubletake abort the session, and the auto-cast
+// monitor then rebuilds the NVENC/output pipeline every few seconds. Rebase
+// only clearly implausible offsets and preserve the timestamp cadence after
+// that so normal A/V clock drift and jitter still reach doubletake unchanged.
+func alignAudioTimestamp(mapped, now time.Time, offset time.Duration, calibrated bool) (time.Time, time.Duration, bool) {
+	if mapped.IsZero() {
+		return mapped, offset, false
+	}
+	threshold := audioClockRuntimeRebaseThreshold
+	if !calibrated {
+		threshold = audioClockInitialRebaseThreshold
+	}
+	aligned := mapped.Add(offset)
+	delta := now.Sub(aligned)
+	if delta > threshold || delta < -threshold {
+		offset += delta
+		aligned = mapped.Add(offset)
+		return aligned, offset, true
+	}
+	return aligned, offset, false
+}
+
+func (s *audioSource) mapTimestamp(obsNS uint64, mapObs func(uint64) time.Time) time.Time {
+	now := time.Now()
+	mapped := mapObs(obsNS)
+	sourceAge := now.Sub(mapped)
+	aligned, offset, rebased := alignAudioTimestamp(mapped, now, s.clockOffset, s.clockCalibrated)
+	if !s.clockCalibrated || rebased {
+		s.clockOffset = offset
+		s.clockCalibrated = true
+		if sourceAge > audioClockInitialRebaseThreshold || sourceAge < -audioClockInitialRebaseThreshold {
+			log.Printf("[TIMING] audio clock rebased by %s (source age %s)",
+				offset.Round(time.Millisecond), sourceAge.Round(time.Millisecond))
+		}
+	}
+	return aligned
 }
 
 func pcmSamplesDuration(samples uint64) time.Duration {
@@ -462,7 +514,7 @@ func (s *streamSession) pushAudio(obsNS uint64, data []byte) bool {
 		return false
 	}
 	select {
-	case s.audio.ch <- audioChunk{data: data, pts: s.mapTime(obsNS)}:
+	case s.audio.ch <- audioChunk{data: data, pts: s.audio.mapTimestamp(obsNS, s.mapTime)}:
 		s.firstAudio.Do(func() {
 			log.Printf("[TIMING] start: first OBS audio packet +%s",
 				time.Since(s.startedAt).Round(time.Millisecond))
@@ -876,7 +928,7 @@ func handleConnection(conn net.Conn, cache *discoveryCache) {
 	defer func() {
 		if session != nil {
 			session.stop()
-			session.wait(3 * time.Second)
+			session.wait(time.Second)
 		}
 	}()
 
@@ -956,7 +1008,7 @@ func handleConnection(conn net.Conn, cache *discoveryCache) {
 		case ipcStop:
 			if session != nil {
 				session.stop()
-				session.wait(3 * time.Second)
+				session.wait(time.Second)
 				session = nil
 			}
 			_ = respond(conn, startResponse{OK: true})

@@ -56,6 +56,10 @@ std::unique_ptr<QTimer> g_auto_cast_timer;
 AirPlayCastSettings g_auto_cast_settings;
 std::atomic<bool> g_auto_cast_armed{false};
 std::chrono::steady_clock::time_point g_last_auto_cast_warning{};
+std::chrono::steady_clock::time_point g_auto_cast_retry_after{};
+std::chrono::steady_clock::time_point g_auto_cast_running_since{};
+AirPlayCastState g_auto_cast_previous_state = AirPlayCastState::Stopped;
+int g_auto_cast_failed_attempts = 0;
 
 std::wstring helper_path()
 {
@@ -95,6 +99,9 @@ void StopAutoCastMonitor()
 	}
 	if (was_armed)
 		blog(LOG_INFO, "[obs-airplay-cast] auto-cast monitor stopped");
+	g_auto_cast_retry_after = {};
+	g_auto_cast_running_since = {};
+	g_auto_cast_failed_attempts = 0;
 }
 
 void LaunchAutoCastPoll()
@@ -124,6 +131,27 @@ void PollAutoCastMonitor()
 		StopAutoCastMonitor();
 		return;
 	}
+	const auto now = std::chrono::steady_clock::now();
+	const AirPlayCastState state = g_airplay_cast->State();
+	if (state == AirPlayCastState::Running && g_auto_cast_previous_state != AirPlayCastState::Running)
+		g_auto_cast_running_since = now;
+	if (state == AirPlayCastState::Stopped &&
+	    (g_auto_cast_previous_state == AirPlayCastState::Running ||
+	     g_auto_cast_previous_state == AirPlayCastState::Starting)) {
+		const bool stable_session = g_auto_cast_previous_state == AirPlayCastState::Running &&
+					    g_auto_cast_running_since.time_since_epoch().count() != 0 &&
+					    now - g_auto_cast_running_since >= std::chrono::seconds(30);
+		if (stable_session)
+			g_auto_cast_failed_attempts = 0;
+		const auto delay = auto_cast_retry_delay(g_auto_cast_failed_attempts, stable_session);
+		g_auto_cast_retry_after = now + delay;
+		if (!stable_session)
+			++g_auto_cast_failed_attempts;
+		blog(LOG_WARNING, "[obs-airplay-cast] auto-cast retry in %lld seconds after unexpected stop",
+		     static_cast<long long>(delay.count()));
+	}
+	g_auto_cast_previous_state = state;
+
 	const AutoCastMonitorAction action =
 		decide_auto_cast_monitor_action(true, g_airplay_cast->State());
 	if (action == AutoCastMonitorAction::None) {
@@ -132,6 +160,9 @@ void PollAutoCastMonitor()
 	}
 	if (action == AutoCastMonitorAction::Wait)
 		return;
+	if (g_auto_cast_retry_after.time_since_epoch().count() != 0 && now < g_auto_cast_retry_after)
+		return;
+	g_auto_cast_retry_after = {};
 	if (!g_auto_cast_future.valid())
 		LaunchAutoCastPoll();
 	if (!g_auto_cast_future.valid())
@@ -195,6 +226,10 @@ void StartAutoCastMonitor()
 
 	g_auto_cast_settings = std::move(settings);
 	g_last_auto_cast_warning = {};
+	g_auto_cast_retry_after = {};
+	g_auto_cast_running_since = {};
+	g_auto_cast_previous_state = g_airplay_cast->State();
+	g_auto_cast_failed_attempts = 0;
 	g_auto_cast_armed = true;
 	if (!g_auto_cast_timer) {
 		g_auto_cast_timer = std::make_unique<QTimer>();
@@ -529,9 +564,9 @@ void frontend_event(enum obs_frontend_event event, void *)
 	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
 		StartAutoCastMonitor();
 	} else if (event == OBS_FRONTEND_EVENT_EXIT) {
-		StopAutoCastMonitor();
 		if (g_airplay_cast)
 			g_airplay_cast->Shutdown();
+		StopAutoCastMonitor();
 	}
 }
 
@@ -560,9 +595,9 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
 	obs_frontend_remove_event_callback(frontend_event, nullptr);
-	StopAutoCastMonitor();
 	if (g_airplay_cast)
 		g_airplay_cast->Shutdown();
+	StopAutoCastMonitor();
 	g_auto_cast_timer.reset();
 	g_airplay_cast.reset();
 	blog(LOG_INFO, "[obs-airplay-cast] unloaded");

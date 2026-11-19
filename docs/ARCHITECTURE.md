@@ -59,7 +59,7 @@ AirPlay 视频数据连接；接收端关闭或崩溃时返回 `disconnected`，
 
 Go bridge 启动时：
 
-1. 创建 mDNS 缓存并在后台刷新。
+1. 创建 mDNS 缓存，并保持一个长期运行的浏览协程更新设备表。
 2. 监听 `127.0.0.1` 的临时 TCP 端口。
 3. 在 stdout 输出 `READY <port>`，OBS DLL 读取端口后连接。
 
@@ -74,7 +74,9 @@ Go bridge 启动时：
 视频和音频使用同一个 OBS 单调时钟基准。插件在启动 OBS output 前发送一次
 `clock` IPC，bridge 只在该会话内建立一次映射；断线后会话对象、队列和映射都会
 重新创建，不复用上一轮时间基准。视频使用系统 PTS 映射到 bridge 的展示时间，
-音频使用 44.1 kHz sample PTS 映射到同一会话时钟。
+音频使用 44.1 kHz sample PTS 映射到同一会话时钟。若 OBS 音频回调时间戳出现超过
+500 ms 的明显偏差，bridge 会为该会话校准一次偏移，避免把可恢复的音频缓冲误判成
+永久过期并触发自动重连风暴。
 
 ## 本机 IPC
 
@@ -119,8 +121,12 @@ helper 的 stdio 协议见 [PROTOCOL.md](PROTOCOL.md)。
 
 ## 生命周期与关闭
 
-- OBS 卸载插件时先停止 output，再关闭 bridge。
+- OBS 卸载插件时先中断可能阻塞的 IPC/网络等待，再停止 output 并关闭 bridge。
 - 停止会话会取消流上下文、关闭 RTSP/媒体连接，并结束 helper。
+- bridge 进程被放入启用 `KILL_ON_JOB_CLOSE` 的 Windows Job Object；OBS 异常退出时
+  会一并结束 bridge 和 AAC-ELD helper，不留下子进程。
+- bridge 的 stop 响应、发现响应和 socket 写操作都有有界等待，避免 OBS 主线程退出时
+  被 30 秒网络超时卡住。
 - helper 关闭时先关闭 stdin，等待 2 秒；超时后才结束子进程。
 - 安装新 DLL 前必须正常关闭 OBS，不能覆盖正在使用的插件文件。
 

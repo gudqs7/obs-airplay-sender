@@ -220,6 +220,7 @@ bool AirPlayCast::Start(const AirPlayCastSettings &settings)
 	if (monitor_thread_.joinable())
 		monitor_thread_.join();
 
+	stop_requested_ = false;
 	state_ = AirPlayCastState::Starting;
 	start_time_ = std::chrono::steady_clock::now();
 	first_video_seen_ = false;
@@ -251,9 +252,15 @@ void AirPlayCast::StartThread(AirPlayCastSettings settings)
 	std::string error;
 	const auto setup_started = std::chrono::steady_clock::now();
 	if (!bridge_.StartSession(bridge_config, info, error)) {
+		if (stop_requested_.load() || state_.load() == AirPlayCastState::Stopping)
+			return;
 		blog(LOG_WARNING, "[obs-airplay-cast] receiver setup failed: %s", error.c_str());
 		StoreError(error);
 		state_ = AirPlayCastState::Stopped;
+		return;
+	}
+	if (stop_requested_.load() || state_.load() != AirPlayCastState::Starting) {
+		bridge_.StopSession();
 		return;
 	}
 	blog(LOG_INFO, "[obs-airplay-cast] timing: AirPlay ready in %lld ms",
@@ -263,8 +270,16 @@ void AirPlayCast::StartThread(AirPlayCastSettings settings)
 
 	const auto output_started = std::chrono::steady_clock::now();
 	if (!StartOutput(info.width, info.height, settings, error)) {
+		if (stop_requested_.load() || state_.load() == AirPlayCastState::Stopping)
+			return;
 		blog(LOG_WARNING, "[obs-airplay-cast] OBS encoder failed: %s", error.c_str());
 		StoreError(error);
+		bridge_.StopSession();
+		state_ = AirPlayCastState::Stopped;
+		return;
+	}
+	if (stop_requested_.load()) {
+		StopOutput();
 		bridge_.StopSession();
 		state_ = AirPlayCastState::Stopped;
 		return;
@@ -387,10 +402,12 @@ bool AirPlayCast::StartOutput(int receiver_width, int receiver_height, const Air
 		return false;
 	}
 
-	// Douyin renders AirPlay video into a partial-range NV12 surface.
+	// Native iPhone AirPlay mirroring uses full-range BT.709 primaries with
+	// sRGB transfer characteristics. Match that contract so Douyin applies its
+	// normal full-range conversion instead of treating our stream differently.
 	obs_encoder_set_gpu_scale_type(video_encoder_, OBS_SCALE_BILINEAR);
-	obs_encoder_set_preferred_color_space(video_encoder_, VIDEO_CS_709);
-	obs_encoder_set_preferred_range(video_encoder_, VIDEO_RANGE_PARTIAL);
+	obs_encoder_set_preferred_color_space(video_encoder_, VIDEO_CS_SRGB);
+	obs_encoder_set_preferred_range(video_encoder_, VIDEO_RANGE_FULL);
 
 	obs_encoder_set_video(video_encoder_, obs_get_video());
 	obs_encoder_set_scaled_size(video_encoder_, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
@@ -471,12 +488,16 @@ void AirPlayCast::StopOutput()
 	video_bytes_ = 0;
 }
 
-void AirPlayCast::Stop()
+void AirPlayCast::StopInternal(bool interrupt_bridge)
 {
 	const AirPlayCastState current = state_.load();
-	if (current == AirPlayCastState::Stopped && !start_thread_.joinable() && !monitor_thread_.joinable())
+	if (current == AirPlayCastState::Stopped && !start_thread_.joinable() && !monitor_thread_.joinable()) {
+		if (interrupt_bridge)
+			bridge_.BeginShutdown();
 		return;
+	}
 
+	stop_requested_ = true;
 	if (current != AirPlayCastState::Stopping)
 		state_ = AirPlayCastState::Stopping;
 	{
@@ -484,20 +505,31 @@ void AirPlayCast::Stop()
 		monitor_quit_ = true;
 	}
 	monitor_cv_.notify_all();
+	if (interrupt_bridge)
+		bridge_.BeginShutdown();
+	else if (current == AirPlayCastState::Starting)
+		bridge_.Interrupt();
 	if (start_thread_.joinable())
 		start_thread_.join();
 	if (monitor_thread_.joinable())
 		monitor_thread_.join();
 	StopOutput();
-	bridge_.StopSession();
+	if (!interrupt_bridge)
+		bridge_.StopSession();
 	state_ = AirPlayCastState::Stopped;
 	blog(LOG_INFO, "[obs-airplay-cast] stopped");
 }
 
+void AirPlayCast::Stop()
+{
+	StopInternal(false);
+}
+
 void AirPlayCast::Shutdown()
 {
-	Stop();
+	StopInternal(true);
 	bridge_.Shutdown();
+	stop_requested_ = false;
 }
 
 void AirPlayCast::HandleEncodedPacket(const encoder_packet *packet)

@@ -69,6 +69,16 @@ int main()
 	expect(decide_auto_cast_monitor_action(true, AirPlayCastState::Stopped) ==
 		       AutoCastMonitorAction::Scan,
 	       "armed monitor must scan again after a receiver disconnect");
+	expect(auto_cast_retry_delay(1, false) == std::chrono::seconds(3),
+	       "first rapid reconnect failure should back off for three seconds");
+	expect(auto_cast_retry_delay(2, false) == std::chrono::seconds(10),
+	       "second rapid reconnect failure should back off for ten seconds");
+	expect(auto_cast_retry_delay(3, false) == std::chrono::seconds(30),
+	       "third rapid reconnect failure should back off for thirty seconds");
+	expect(auto_cast_retry_delay(4, false) == std::chrono::seconds(60),
+	       "repeated reconnect failures should cap at sixty seconds");
+	expect(auto_cast_retry_delay(9, true) == std::chrono::seconds(3),
+	       "a stable session should reset reconnect backoff");
 
 	expect(decide_initial_scan_action(true, true) == InitialScanAction::WaitForAutoCast,
 	       "auto-cast waiting must not start a second scan status line");

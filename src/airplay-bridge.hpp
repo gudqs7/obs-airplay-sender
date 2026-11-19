@@ -52,6 +52,8 @@ public:
 	bool DiscoverDevices(std::vector<AirPlayDeviceInfo> &devices, const std::string &preferred,
 			     std::string &error);
 	void StopSession();
+	void Interrupt();
+	void BeginShutdown();
 	void Shutdown();
 
 	bool SyncClock(uint64_t obs_time_ns);
@@ -84,17 +86,20 @@ private:
 
 	std::wstring helper_path_;
 	HANDLE process_ = nullptr;
+	HANDLE job_ = nullptr;
 	HANDLE stdout_read_ = nullptr;
 	HANDLE log_file_ = nullptr;
 	SOCKET socket_ = INVALID_SOCKET;
 
 	std::mutex queue_mutex_;
 	std::condition_variable queue_cv_;
+	std::condition_variable writer_done_cv_;
 	std::deque<Packet> queue_;
 	size_t queued_bytes_ = 0;
 	bool writer_quit_ = false;
 	std::atomic<bool> writer_running_{false};
 	std::atomic<bool> writer_drop_logged_{false};
+	std::atomic<bool> shutting_down_{false};
 	std::thread writer_thread_;
 
 	std::mutex io_mutex_;

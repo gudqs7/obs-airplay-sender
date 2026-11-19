@@ -183,9 +183,10 @@ ZIP 是手动安装包，解压后把顶层 `obs-airplay-cast` 目录放到
 启用 `启动OBS自动连接抖音` 后，OBS 每次完成启动都会自动查找名称形如
 `抖音直播伴侣[xxxxxx]` 的接收端。若启动时尚未发现，插件会每秒重新检测，并在发现后
 立即开始投屏。连接期间如果抖音直播伴侣崩溃、关闭或重启，插件会检测到会话断开并
-重新进入每秒扫描，接收端恢复后自动连接。该选项对未配置用户默认勾选；用户主动关闭
-后会持久保存为关闭，后续 OBS 启动不会再次自动打开。手动停止投屏或退出 OBS 会取消
-自动重连。
+重新扫描，接收端恢复后自动连接。连续快速失败时重连间隔会按 3、10、30、60 秒退避，
+避免持续重建编码器拖慢系统；稳定运行 30 秒后再次断开则从 3 秒重新开始。该选项对
+未配置用户默认勾选；用户主动关闭后会持久保存为关闭，后续 OBS 启动不会再次自动
+打开。手动停止投屏或退出 OBS 会取消自动重连。
 
 ## 推荐设置
 
@@ -198,11 +199,15 @@ ZIP 是手动安装包，解压后把顶层 `obs-airplay-cast` 目录放到
 
 ### 抖音色彩校准 LUT
 
-`tools/luts/` 提供从实测颜色生成的 33³ LUT：
+当前发送端匹配原生 iPhone AirPlay 的 `sRGB + full range` 编码。下面这些 LUT 是在旧版
+`BT.709 + limited range` 链路上实测生成的，只用于兼容旧构建；使用当前 full-range
+发送端时应先不叠加 LUT，避免二次校色。
+
+`tools/luts/` 保留以下 33³ LUT：
 
 | 文件 | 用途 |
 |---|---|
-| `douyin-airplay-color-correct.cube` | 默认实测校准 |
+| `douyin-airplay-color-correct.cube` | 旧 limited-range 链路的默认实测校准 |
 | `douyin-airplay-color-correct-soft60.cube` | 默认校准强度的 60% |
 | `douyin-airplay-color-correct-soft40.cube` | 默认校准强度的 40% |
 | `douyin-airplay-color-correct-boost.cube` | 高饱和补偿版本 |
@@ -355,6 +360,9 @@ Apache-2.0 不替代 MPEG AAC 必要专利授权。分发包含 AAC 编码器的
 
 ## 版本说明
 
+- `0.1.7`：修复长时间运行后的 mDNS 句柄/线程增长、音频时间戳误判导致的自动重连
+  风暴和编码器反复重建；自动重连增加 `3/10/30/60` 秒退避；退出等待改为有界，并用
+  Windows Job Object 清理 bridge/AAC helper 进程树；视频改为 `sRGB + full range`。
 - `0.1.6`：修复自动等待状态重复显示；视频时间改用系统 PTS，并显式关闭 NVENC、QSV
   和 x264 的 B 帧；新增 `80-500 ms` 音画缓冲，修复 50ms 以上网络延迟下的视频背压和
   IDR 恢复；AAC-ELD 子帧时间戳改为按 OBS 音频 chunk 和采样偏移计算。

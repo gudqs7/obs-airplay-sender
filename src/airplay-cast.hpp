@@ -51,6 +51,7 @@ public:
 	void HandleOutputStop();
 
 private:
+	void StopInternal(bool interrupt_bridge);
 	void StartThread(AirPlayCastSettings settings);
 	void MonitorSession();
 	bool StartOutput(int receiver_width, int receiver_height, const AirPlayCastSettings &settings,
@@ -61,6 +62,7 @@ private:
 
 	AirPlayBridge bridge_;
 	std::atomic<AirPlayCastState> state_{AirPlayCastState::Stopped};
+	std::atomic<bool> stop_requested_{false};
 	std::thread start_thread_;
 	std::thread monitor_thread_;
 	std::mutex monitor_mutex_;

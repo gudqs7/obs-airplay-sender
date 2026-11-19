@@ -558,7 +558,7 @@ index b398755..8acbd51 100644
  		return receiverCompatibility{}, err
  	}
 diff --git a/internal/airplay/discovery.go b/internal/airplay/discovery.go
-index 94234d2..f9833fc 100644
+index 94234d2..c7a5ec9 100644
 --- a/internal/airplay/discovery.go
 +++ b/internal/airplay/discovery.go
 @@ -4,6 +4,7 @@ import (
@@ -569,7 +569,7 @@ index 94234d2..f9833fc 100644
  	"fmt"
  	"net"
  	"strconv"
-@@ -77,12 +78,27 @@ func (f *FeatureSet) UnmarshalPlist(unmarshal func(interface{}) error) error {
+@@ -77,12 +78,26 @@ func (f *FeatureSet) UnmarshalPlist(unmarshal func(interface{}) error) error {
  
  // DiscoverAirPlayDevices browses the local network for AirPlay receivers.
  func DiscoverAirPlayDevices(ctx context.Context) ([]AirPlayDevice, error) {
@@ -594,12 +594,11 @@ index 94234d2..f9833fc 100644
  	}
  	if len(ifaces) == 0 {
 -		return nil, nil
-+		<-ctx.Done()
-+		return ctx.Err()
++		return fmt.Errorf("mDNS interfaces: no LAN multicast interface is available")
  	}
  
  	resolver, err := zeroconf.NewResolver(
-@@ -90,30 +106,30 @@ func DiscoverAirPlayDevices(ctx context.Context) ([]AirPlayDevice, error) {
+@@ -90,30 +105,30 @@ func DiscoverAirPlayDevices(ctx context.Context) ([]AirPlayDevice, error) {
  		zeroconf.SelectIPTraffic(traffic),
  	)
  	if err != nil {
@@ -609,44 +608,36 @@ index 94234d2..f9833fc 100644
  
  	entries := make(chan *zeroconf.ServiceEntry, 16)
 -	var devices []AirPlayDevice
-+	if err := resolver.Browse(ctx, "_airplay._tcp", "local.", entries); err != nil {
-+		return fmt.Errorf("browse: %w", err)
-+	}
- 
--	done := make(chan struct{})
--	go func() {
--		defer close(done)
--		for entry := range entries {
+-
+ 	done := make(chan struct{})
+ 	go func() {
+ 		defer close(done)
+ 		for entry := range entries {
 -			dev := parseServiceEntry(entry)
 -			if dev != nil {
 -				devices = append(devices, *dev)
-+	for {
-+		select {
-+		case <-ctx.Done():
-+			return ctx.Err()
-+		case entry := <-entries:
-+			if entry == nil {
-+				if err := ctx.Err(); err != nil {
-+					return err
-+				}
-+				return fmt.Errorf("mDNS browse ended")
-+			}
 +			if dev := parseServiceEntry(entry); dev != nil && found != nil {
 +				found(*dev)
  			}
  		}
--	}()
--
--	if err := resolver.Browse(ctx, "_airplay._tcp", "local.", entries); err != nil {
+ 	}()
+ 
+ 	if err := resolver.Browse(ctx, "_airplay._tcp", "local.", entries); err != nil {
 -		return nil, fmt.Errorf("browse: %w", err)
++		return fmt.Errorf("browse: %w", err)
  	}
--
--	<-ctx.Done()
--	<-done
+ 
++	// zeroconf closes the entries channel only after its receive loop releases
++	// the multicast sockets. Waiting for that closure prevents a long-running
++	// cache from leaking one UDP socket and receive goroutine per refresh.
+ 	<-ctx.Done()
+ 	<-done
 -	return devices, nil
++	return ctx.Err()
  }
  
  func airPlayMDNSInterfaces() ([]net.Interface, zeroconf.IPType, error) {
+
 diff --git a/internal/airplay/mirror.go b/internal/airplay/mirror.go
 index 9878434..c8d7a20 100644
 --- a/internal/airplay/mirror.go

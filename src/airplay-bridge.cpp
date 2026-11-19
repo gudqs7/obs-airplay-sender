@@ -23,6 +23,11 @@ constexpr uint16_t kIpcDiscover = 6;
 constexpr uint16_t kIpcStatus = 7;
 constexpr uint16_t kIpcResponse = 100;
 constexpr size_t kMaxQueuedBytes = 64 * 1024 * 1024;
+constexpr DWORD kSocketTimeoutMs = 5000;
+constexpr DWORD kStartResponseTimeoutMs = 15000;
+constexpr DWORD kDiscoveryResponseTimeoutMs = 3000;
+constexpr DWORD kStopResponseTimeoutMs = 1500;
+constexpr auto kWriterStopTimeout = std::chrono::seconds(2);
 
 void put_u16(uint8_t *dst, uint16_t value)
 {
@@ -94,6 +99,21 @@ std::wstring quote_path(const std::wstring &path)
 	return L"\"" + path + L"\"";
 }
 
+HANDLE create_kill_on_close_job()
+{
+	HANDLE job = CreateJobObjectW(nullptr, nullptr);
+	if (!job)
+		return nullptr;
+
+	JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
+	limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+	if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+		CloseHandle(job);
+		return nullptr;
+	}
+	return job;
+}
+
 } // namespace
 
 AirPlayBridge::AirPlayBridge(std::wstring helper_path) : helper_path_(std::move(helper_path))
@@ -109,6 +129,10 @@ AirPlayBridge::~AirPlayBridge()
 
 bool AirPlayBridge::EnsureHelper(std::string &error)
 {
+	if (shutting_down_.load()) {
+		error = "AirPlay bridge is shutting down";
+		return false;
+	}
 	if (process_ && WaitForSingleObject(process_, 0) == WAIT_TIMEOUT && socket_ != INVALID_SOCKET) {
 		StartWriter();
 		return true;
@@ -120,6 +144,7 @@ bool AirPlayBridge::EnsureHelper(std::string &error)
 		error = "Winsock initialization failed";
 		return false;
 	}
+	job_ = create_kill_on_close_job();
 
 	SECURITY_ATTRIBUTES security = {};
 	security.nLength = sizeof(security);
@@ -155,7 +180,7 @@ bool AirPlayBridge::EnsureHelper(std::string &error)
 	mutable_command.push_back(L'\0');
 
 	BOOL created = CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, TRUE,
-				      CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr,
+				      CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED, nullptr,
 				      working_directory.wstring().c_str(), &startup, &process);
 
 	CloseHandle(stdout_write);
@@ -170,10 +195,33 @@ bool AirPlayBridge::EnsureHelper(std::string &error)
 			CloseHandle(log_file_);
 			log_file_ = nullptr;
 		}
+		if (job_) {
+			CloseHandle(job_);
+			job_ = nullptr;
+		}
 		return false;
 	}
 
 	process_ = process.hProcess;
+	if (shutting_down_.load()) {
+		error = "AirPlay bridge shutdown interrupted startup";
+		CloseHandle(process.hThread);
+		TerminateHelper();
+		return false;
+	}
+	if (job_ && !AssignProcessToJobObject(job_, process_)) {
+		blog(LOG_WARNING, "[obs-airplay-cast] could not add bridge helper to job object (error %lu)",
+		     GetLastError());
+		CloseHandle(job_);
+		job_ = nullptr;
+	}
+	if (ResumeThread(process.hThread) == static_cast<DWORD>(-1)) {
+		error = "Could not resume obs-airplay-bridge.exe";
+		TerminateProcess(process_, 1);
+		CloseHandle(process.hThread);
+		TerminateHelper();
+		return false;
+	}
 	CloseHandle(process.hThread);
 
 	uint16_t port = 0;
@@ -237,7 +285,7 @@ bool AirPlayBridge::ConnectSocket(uint16_t port, std::string &error)
 		return false;
 	}
 
-	DWORD timeout = 30000;
+	DWORD timeout = kSocketTimeoutMs;
 	setsockopt(socket_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&timeout),
 		   sizeof(timeout));
 	setsockopt(socket_, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&timeout),
@@ -299,7 +347,7 @@ bool AirPlayBridge::SendDiscover(std::vector<AirPlayDeviceInfo> &devices,
 	}
 
 	std::string response;
-	if (!ReceiveResponse(response, error))
+	if (!ReceiveResponse(response, error, kDiscoveryResponseTimeoutMs))
 		return false;
 
 	obs_data_t *result = obs_data_create_from_json(response.c_str());
@@ -357,7 +405,7 @@ bool AirPlayBridge::SendStart(const AirPlayBridgeConfig &config, AirPlaySessionI
 	}
 
 	std::string response;
-	if (!ReceiveResponse(response, error))
+	if (!ReceiveResponse(response, error, kStartResponseTimeoutMs))
 		return false;
 
 	obs_data_t *result = obs_data_create_from_json(response.c_str());
@@ -397,7 +445,7 @@ bool AirPlayBridge::ReceiveResponse(std::string &payload, std::string &error, in
 
 	std::array<uint8_t, kIpcHeaderBytes> raw = {};
 	const bool received = recv_all(socket_, raw.data(), raw.size());
-	DWORD default_timeout = 30000;
+	DWORD default_timeout = kSocketTimeoutMs;
 	const auto restore_timeout = [&]() {
 		setsockopt(socket_, SOL_SOCKET, SO_RCVTIMEO,
 			   reinterpret_cast<const char *>(&default_timeout), sizeof(default_timeout));
@@ -562,6 +610,7 @@ void AirPlayBridge::WriterLoop()
 		}
 	}
 	writer_running_ = false;
+	writer_done_cv_.notify_all();
 }
 
 void AirPlayBridge::StartWriter()
@@ -612,6 +661,13 @@ void AirPlayBridge::StopWriter()
 		queued_bytes_ = 0;
 	}
 	queue_cv_.notify_all();
+	if (writer_thread_.joinable() && writer_running_.load()) {
+		std::unique_lock<std::mutex> lock(queue_mutex_);
+		writer_done_cv_.wait_for(lock, kWriterStopTimeout,
+					 [this]() { return !writer_running_.load(); });
+	}
+	if (writer_running_.load())
+		CloseSocket();
 	if (writer_thread_.joinable())
 		writer_thread_.join();
 	const bool was_running = writer_running_.exchange(false);
@@ -623,18 +679,40 @@ void AirPlayBridge::StopSession()
 {
 	std::lock_guard<std::mutex> operation(operation_mutex_);
 	StopWriter();
-	if (socket_ == INVALID_SOCKET)
+	if (socket_ == INVALID_SOCKET) {
+		TerminateHelper();
 		return;
+	}
 
 	if (SendPacket(kIpcStop, 0, nullptr, 0)) {
 		std::string payload;
 		std::string error;
-		ReceiveResponse(payload, error);
+		if (!ReceiveResponse(payload, error, kStopResponseTimeoutMs))
+			CloseSocket();
+	} else {
+		CloseSocket();
 	}
+	if (socket_ == INVALID_SOCKET)
+		TerminateHelper();
+}
+
+void AirPlayBridge::Interrupt()
+{
+	CloseSocket();
+	queue_cv_.notify_all();
+	if (process_)
+		TerminateProcess(process_, 1);
+}
+
+void AirPlayBridge::BeginShutdown()
+{
+	shutting_down_ = true;
+	Interrupt();
 }
 
 void AirPlayBridge::Shutdown()
 {
+	BeginShutdown();
 	StopSession();
 	CloseSocket();
 	TerminateHelper();
@@ -670,9 +748,15 @@ void AirPlayBridge::TerminateHelper()
 		log_file_ = nullptr;
 	}
 	if (process_) {
-		if (WaitForSingleObject(process_, 1500) == WAIT_TIMEOUT)
+		if (WaitForSingleObject(process_, 1500) == WAIT_TIMEOUT) {
 			TerminateProcess(process_, 1);
+			WaitForSingleObject(process_, 1000);
+		}
 		CloseHandle(process_);
 		process_ = nullptr;
+	}
+	if (job_) {
+		CloseHandle(job_);
+		job_ = nullptr;
 	}
 }
